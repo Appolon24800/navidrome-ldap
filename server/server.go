@@ -189,6 +189,7 @@ func (s *Server) initRoutes() {
 		r.Group(func(r chi.Router) {
 			r.Use(defaultMiddlewares...)
 			r.Use(Authenticator(s.ds))
+			r.Use(AppPasswordVerifier(s.ds))
 			r.Use(JWTRefresher)
 			r.Handle(path.Join(conf.Server.BasePath, consts.URLPathNativeAPI, "events"), s.broker)
 		})

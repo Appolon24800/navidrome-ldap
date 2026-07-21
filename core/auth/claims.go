@@ -22,6 +22,15 @@ type Claims struct {
 	Format  string // "f" - audio format
 	BitRate int    // "b" - audio bitrate
 	ShareID string // "sid" - share ID for share stream tokens
+
+	// AppPasswordID/AppPasswordName ("apid"/"apnm") are set on session tokens
+	// issued via /auth/login when an LDAP-backed user authenticates with a
+	// per-device app password. server.AppPasswordVerifier checks apid on each
+	// Native API request and rejects the token once the app password is
+	// revoked or deleted. Absent on all other tokens (local users, LDAP
+	// directory logins), which skip that check.
+	AppPasswordID   string // "apid"
+	AppPasswordName string // "apnm" - informational (device/app name)
 }
 
 // ToMap converts Claims to a map[string]any for use with TokenAuth.Encode().
@@ -57,6 +66,12 @@ func (c Claims) ToMap() map[string]any {
 	}
 	if c.ShareID != "" {
 		m["sid"] = c.ShareID
+	}
+	if c.AppPasswordID != "" {
+		m["apid"] = c.AppPasswordID
+	}
+	if c.AppPasswordName != "" {
+		m["apnm"] = c.AppPasswordName
 	}
 	return m
 }
@@ -99,6 +114,14 @@ func ClaimsFromToken(token jwt.Token) Claims {
 	var sid string
 	if err := token.Get("sid", &sid); err == nil {
 		c.ShareID = sid
+	}
+	var apid string
+	if err := token.Get("apid", &apid); err == nil {
+		c.AppPasswordID = apid
+	}
+	var apnm string
+	if err := token.Get("apnm", &apnm); err == nil {
+		c.AppPasswordName = apnm
 	}
 	return c
 }

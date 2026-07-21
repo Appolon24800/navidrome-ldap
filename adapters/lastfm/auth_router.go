@@ -53,6 +53,7 @@ func (s *Router) routes() http.Handler {
 
 	r.Group(func(r chi.Router) {
 		r.Use(server.Authenticator(s.ds))
+		r.Use(server.AppPasswordVerifier(s.ds))
 		r.Use(server.JWTRefresher)
 
 		r.Get("/link", s.getLinkStatus)

@@ -444,4 +444,157 @@ var _ = Describe("Auth", func() {
 			})
 		})
 	})
+
+	Describe("App password login", func() {
+		var ds model.DataStore
+		var mockAppPass *tests.MockedAppPasswordRepo
+		var originalHost string
+
+		BeforeEach(func() {
+			ds = &tests.MockDataStore{}
+			auth.Init(ds)
+			mockAppPass = ds.AppPassword(context.Background()).(*tests.MockedAppPasswordRepo)
+			originalHost = conf.Server.LDAP.Host
+			// App-password login must not depend on the directory; keep it
+			// disabled so the happy path never tries a real LDAP bind.
+			conf.Server.LDAP.Host = ""
+		})
+
+		AfterEach(func() {
+			conf.Server.LDAP.Host = originalHost
+		})
+
+		It("logs in an LDAP-backed user with a valid app password", func() {
+			usr := ds.User(context.Background())
+			_ = usr.Put(&model.User{ID: "ldap-1", UserName: "ldapper", Name: "Ldapper", AuthType: model.AuthTypeLDAP})
+			_ = mockAppPass.Put(&model.AppPassword{UserID: "ldap-1", Name: "Feishin", NewPassword: "app-secret"})
+
+			req := httptest.NewRequest("POST", "/login", strings.NewReader(`{"username":"ldapper","password":"app-secret"}`))
+			resp := httptest.NewRecorder()
+			login(ds)(resp, req)
+
+			Expect(resp.Code).To(Equal(http.StatusOK))
+			var parsed map[string]any
+			Expect(json.Unmarshal(resp.Body.Bytes(), &parsed)).To(BeNil())
+			Expect(parsed["username"]).To(Equal("ldapper"))
+			tokenStr := parsed["token"].(string)
+			Expect(tokenStr).ToNot(BeEmpty())
+
+			claims, err := auth.Validate(tokenStr)
+			Expect(err).To(BeNil())
+			Expect(claims.AppPasswordID).ToNot(BeEmpty())
+			Expect(claims.AppPasswordName).To(Equal("Feishin"))
+		})
+
+		It("fails when an LDAP user submits a wrong password", func() {
+			usr := ds.User(context.Background())
+			_ = usr.Put(&model.User{ID: "ldap-1", UserName: "ldapper", Name: "Ldapper", AuthType: model.AuthTypeLDAP})
+			_ = mockAppPass.Put(&model.AppPassword{UserID: "ldap-1", Name: "Feishin", NewPassword: "app-secret"})
+
+			req := httptest.NewRequest("POST", "/login", strings.NewReader(`{"username":"ldapper","password":"wrong"}`))
+			resp := httptest.NewRecorder()
+			login(ds)(resp, req)
+
+			// No app-password match and no reachable directory → 401.
+			Expect(resp.Code).To(Equal(http.StatusUnauthorized))
+		})
+
+		It("does not let a non-LDAP user log in with an app password", func() {
+			usr := ds.User(context.Background())
+			_ = usr.Put(&model.User{ID: "local-1", UserName: "localer", Name: "Localer", NewPassword: "real-pass"})
+			_ = mockAppPass.Put(&model.AppPassword{UserID: "local-1", Name: "Feishin", NewPassword: "app-secret"})
+
+			// The directory password still works.
+			req := httptest.NewRequest("POST", "/login", strings.NewReader(`{"username":"localer","password":"real-pass"}`))
+			resp := httptest.NewRecorder()
+			login(ds)(resp, req)
+			Expect(resp.Code).To(Equal(http.StatusOK))
+
+			// The app password must NOT grant web/JWT access to a local user.
+			req = httptest.NewRequest("POST", "/login", strings.NewReader(`{"username":"localer","password":"app-secret"}`))
+			resp = httptest.NewRecorder()
+			login(ds)(resp, req)
+			Expect(resp.Code).To(Equal(http.StatusUnauthorized))
+		})
+	})
+
+	Describe("AppPasswordVerifier", func() {
+		var ds model.DataStore
+		var mockAppPass *tests.MockedAppPasswordRepo
+
+		BeforeEach(func() {
+			ds = &tests.MockDataStore{}
+			auth.Init(ds)
+			mockAppPass = ds.AppPassword(context.Background()).(*tests.MockedAppPasswordRepo)
+		})
+
+		// chain wires JWTVerifier → AppPasswordVerifier → final handler, mirroring
+		// how the Native API mounts the middleware.
+		chain := func(final http.Handler) http.Handler {
+			return JWTVerifier(AppPasswordVerifier(ds)(final))
+		}
+
+		doRequest := func(token string) (*httptest.ResponseRecorder, *bool) {
+			called := false
+			h := chain(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest("GET", "/api/song", nil)
+			if token != "" {
+				req.Header.Set(consts.UIAuthorizationHeader, "Bearer "+token)
+			}
+			resp := httptest.NewRecorder()
+			h.ServeHTTP(resp, req)
+			return resp, &called
+		}
+
+		It("passes through when there is no token", func() {
+			resp, called := doRequest("")
+			Expect(*called).To(BeTrue())
+			Expect(resp.Code).To(Equal(http.StatusOK))
+		})
+
+		It("passes through for a regular token without an apid claim", func() {
+			token, err := auth.CreateToken(&model.User{ID: "u1", UserName: "regular"})
+			Expect(err).To(BeNil())
+
+			resp, called := doRequest(token)
+			Expect(*called).To(BeTrue())
+			Expect(resp.Code).To(Equal(http.StatusOK))
+		})
+
+		It("passes through when the backing app password is still active", func() {
+			_ = ds.User(context.Background()).Put(&model.User{ID: "u-ldap", UserName: "ldapper", AuthType: model.AuthTypeLDAP})
+			_ = mockAppPass.Put(&model.AppPassword{ID: "ap-active", UserID: "u-ldap", Name: "Feishin", NewPassword: "secret"})
+			token, err := auth.CreateTokenWithAppPassword(&model.User{ID: "u-ldap", UserName: "ldapper", AuthType: model.AuthTypeLDAP}, "ap-active", "Feishin")
+			Expect(err).To(BeNil())
+
+			resp, called := doRequest(token)
+			Expect(*called).To(BeTrue())
+			Expect(resp.Code).To(Equal(http.StatusOK))
+		})
+
+		It("rejects with 401 when the app password has been revoked", func() {
+			_ = ds.User(context.Background()).Put(&model.User{ID: "u-ldap", UserName: "ldapper", AuthType: model.AuthTypeLDAP})
+			_ = mockAppPass.Put(&model.AppPassword{ID: "ap-revoked", UserID: "u-ldap", Name: "Feishin", NewPassword: "secret"})
+			token, err := auth.CreateTokenWithAppPassword(&model.User{ID: "u-ldap", UserName: "ldapper", AuthType: model.AuthTypeLDAP}, "ap-revoked", "Feishin")
+			Expect(err).To(BeNil())
+
+			Expect(mockAppPass.Revoke("ap-revoked")).To(BeNil())
+
+			resp, called := doRequest(token)
+			Expect(*called).To(BeFalse())
+			Expect(resp.Code).To(Equal(http.StatusUnauthorized))
+		})
+
+		It("rejects with 401 when the app password no longer exists", func() {
+			token, err := auth.CreateTokenWithAppPassword(&model.User{ID: "u-ldap", UserName: "ldapper", AuthType: model.AuthTypeLDAP}, "ap-missing", "Feishin")
+			Expect(err).To(BeNil())
+
+			resp, called := doRequest(token)
+			Expect(*called).To(BeFalse())
+			Expect(resp.Code).To(Equal(http.StatusUnauthorized))
+		})
+	})
 })

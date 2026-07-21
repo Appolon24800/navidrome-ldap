@@ -48,18 +48,39 @@ func login(ds model.DataStore) func(w http.ResponseWriter, r *http.Request) {
 }
 
 func doLogin(ds model.DataStore, username string, password string, w http.ResponseWriter, r *http.Request) {
-	user, err := ValidateLogin(ds.User(r.Context()), username, password)
-	if err != nil {
-		_ = rest.RespondWithError(w, http.StatusInternalServerError, "Unknown error authentication user. Please try again")
-		return
-	}
+	// LDAP-backed users have no persistent password and authenticate against
+	// the directory on every web login. To let Navidrome-native clients
+	// (e.g. Feishin, which POSTs to /auth/login) work with an LDAP account,
+	// allow them to log in using a per-device app password — the same kind
+	// used for the Subsonic API. This is a fallback for LDAP users only;
+	// everyone else is handled solely by ValidateLogin. The comparison
+	// reuses the AppPassword repository's FindActiveByUser (which performs
+	// the AES-GCM decryption) and the same plaintext check as
+	// server/subsonic/middlewares.go:matchAppPassword.
+	user, appPassID, appPassName := tryAppPasswordLogin(r.Context(), ds, username, password)
 	if user == nil {
-		log.Warn(r, "Unsuccessful login", "username", username, "request", r.Header)
-		_ = rest.RespondWithError(w, http.StatusUnauthorized, "Invalid username or password")
-		return
+		var err error
+		user, err = ValidateLogin(ds.User(r.Context()), username, password)
+		if err != nil {
+			_ = rest.RespondWithError(w, http.StatusInternalServerError, "Unknown error authentication user. Please try again")
+			return
+		}
+		if user == nil {
+			log.Warn(r, "Unsuccessful login", "username", username, "request", r.Header)
+			_ = rest.RespondWithError(w, http.StatusUnauthorized, "Invalid username or password")
+			return
+		}
 	}
 
-	tokenString, err := auth.CreateToken(user)
+	// Embed the backing app password in the JWT so AppPasswordVerifier can
+	// invalidate the session the moment that credential is revoked/deleted.
+	var tokenString string
+	var err error
+	if appPassID != "" {
+		tokenString, err = auth.CreateTokenWithAppPassword(user, appPassID, appPassName)
+	} else {
+		tokenString, err = auth.CreateToken(user)
+	}
 	if err != nil {
 		_ = rest.RespondWithError(w, http.StatusInternalServerError, "Unknown error authenticating user. Please try again")
 		return
@@ -93,6 +114,48 @@ func buildAuthPayload(user *model.User) map[string]any {
 	payload["subsonicToken"] = hex.EncodeToString(subsonicToken[:])
 
 	return payload
+}
+
+// tryAppPasswordLogin lets an LDAP-backed user authenticate against
+// /auth/login using one of their per-device app passwords — the same
+// credentials used for the Subsonic API. It looks up the user and, only if
+// they are LDAP-backed, compares the supplied plaintext password against
+// their active app passwords. This reuses the AppPassword repository's
+// FindActiveByUser (which performs the AES-GCM decryption) and the same
+// plaintext comparison as server/subsonic/middlewares.go:matchAppPassword, so
+// no new hashing/comparison scheme is introduced. Non-LDAP users are
+// unaffected. Returns (user, appPassID, appPassName) on a match, or
+// (nil, "", "") otherwise so the caller falls through to ValidateLogin /
+// the LDAP bind.
+func tryAppPasswordLogin(ctx context.Context, ds model.DataStore, username, password string) (*model.User, string, string) {
+	if password == "" {
+		return nil, "", ""
+	}
+	u, err := ds.User(ctx).FindByUsername(username)
+	if err != nil || !u.IsLDAP() {
+		return nil, "", ""
+	}
+	active, err := ds.AppPassword(ctx).FindActiveByUser(u.ID)
+	if err != nil {
+		log.Warn(ctx, "Error loading app passwords", "username", username, err)
+		return nil, "", ""
+	}
+	for _, ap := range active {
+		if password == ap.Password {
+			if touchErr := ds.AppPassword(ctx).Touch(ap.ID); touchErr != nil {
+				log.Warn(ctx, "Failed to bump app password last_used_at", "id", ap.ID, "username", username, touchErr)
+			}
+			// LDAP users carry no directory password; mirror the scrub done
+			// in validateLoginLDAP so buildAuthPayload's subsonicToken is
+			// computed over an empty value, consistent with a normal login.
+			u.Password = ""
+			if err := ds.User(ctx).UpdateLastLoginAt(u.ID); err != nil {
+				log.Error(ctx, "Could not update LastLoginAt", "user", username, err)
+			}
+			return u, ap.ID, ap.Name
+		}
+	}
+	return nil, "", ""
 }
 
 func getCredentialsFromBody(r *http.Request) (username string, password string, err error) {
@@ -388,6 +451,44 @@ func Authenticator(ds model.DataStore) func(next http.Handler) http.Handler {
 			}
 
 			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// AppPasswordVerifier invalidates session tokens that were issued via an app
+// password (carrying the "apid" claim) the moment that app password no longer
+// exists or has been revoked. It only acts on token-bearing requests; tokens
+// without the claim — regular local-user sessions, LDAP directory logins, dev
+// auto-login, reverse-proxy auth — pass through untouched. Mount it after
+// Authenticator on the Native API so JWT clients such as Feishin are cut off
+// immediately when an app password is revoked.
+func AppPasswordVerifier(ds model.DataStore) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			token, _, err := jwtauth.FromContext(ctx)
+			if err != nil || token == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			claims := auth.ClaimsFromToken(token)
+			if claims.AppPasswordID == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			ap, err := ds.AppPassword(ctx).Get(claims.AppPasswordID)
+			// Fail closed: a missing (deleted) or revoked app password — or a
+			// lookup error — rejects the request. Authenticator already did a
+			// successful DB read for the user, so a transient error here is
+			// unlikely; revocation must take effect immediately.
+			if err != nil || !ap.IsActive() {
+				log.Warn(ctx, "API: Rejecting request backed by revoked/missing app password",
+					"appPasswordId", claims.AppPasswordID, "appPasswordName", claims.AppPasswordName,
+					"username", claims.Subject, "remoteAddr", r.RemoteAddr, err)
+				_ = rest.RespondWithError(w, http.StatusUnauthorized, "Invalid credentials")
+				return
+			}
+			next.ServeHTTP(w, r)
 		})
 	}
 }

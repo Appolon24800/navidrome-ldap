@@ -61,12 +61,27 @@ func CreateExpiringPublicToken(exp time.Time, claims Claims) (string, error) {
 }
 
 func CreateToken(u *model.User) (string, error) {
+	return createToken(u, "", "")
+}
+
+// CreateTokenWithAppPassword is like CreateToken but embeds the app password
+// that authenticated the session (the apid/apnm claims). The Native API's
+// AppPasswordVerifier inspects apid on each request and rejects the token once
+// that app password is revoked or deleted. Used by /auth/login when an
+// LDAP-backed user logs in with a per-device app password.
+func CreateTokenWithAppPassword(u *model.User, appPassID, appPassName string) (string, error) {
+	return createToken(u, appPassID, appPassName)
+}
+
+func createToken(u *model.User, appPassID, appPassName string) (string, error) {
 	claims := Claims{
-		Issuer:   consts.JWTIssuer,
-		Subject:  u.UserName,
-		IssuedAt: time.Now(),
-		UserID:   u.ID,
-		IsAdmin:  u.IsAdmin,
+		Issuer:          consts.JWTIssuer,
+		Subject:         u.UserName,
+		IssuedAt:        time.Now(),
+		UserID:          u.ID,
+		IsAdmin:         u.IsAdmin,
+		AppPasswordID:   appPassID,
+		AppPasswordName: appPassName,
 	}
 	token, _, err := TokenAuth.Encode(claims.ToMap())
 	if err != nil {
