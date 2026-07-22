@@ -20,5 +20,5 @@ jobs:
         with:
           push: true
           tags: |
-            ghcr.io/${{ appolon24800 }}/navidrome-ldap:latest
-            ghcr.io/${{ appolon24800 }}/navidrome-ldap:${{ github.sha }}
+            ghcr.io/appolon24800/navidrome-ldap:latest
+            ghcr.io/appolon24800/navidrome-ldap:${{ github.sha }}
