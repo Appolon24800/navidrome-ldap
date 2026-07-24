@@ -484,6 +484,15 @@ var _ = Describe("Auth", func() {
 			Expect(err).To(BeNil())
 			Expect(claims.AppPasswordID).ToNot(BeEmpty())
 			Expect(claims.AppPasswordName).To(Equal("Feishin"))
+
+			// The subsonic salt+token must be derived from the app password so
+			// the client's subsequent /rest calls (echoing t/s back) are
+			// accepted by matchAppPassword.
+			Expect(parsed["subsonicSalt"]).ToNot(BeEmpty())
+			Expect(parsed["subsonicToken"]).ToNot(BeEmpty())
+			salt := parsed["subsonicSalt"].(string)
+			expected := fmt.Sprintf("%x", md5.Sum([]byte("app-secret"+salt)))
+			Expect(parsed["subsonicToken"]).To(Equal(expected))
 		})
 
 		It("fails when an LDAP user submits a wrong password", func() {

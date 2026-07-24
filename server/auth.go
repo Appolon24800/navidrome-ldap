@@ -57,7 +57,7 @@ func doLogin(ds model.DataStore, username string, password string, w http.Respon
 	// reuses the AppPassword repository's FindActiveByUser (which performs
 	// the AES-GCM decryption) and the same plaintext check as
 	// server/subsonic/middlewares.go:matchAppPassword.
-	user, appPassID, appPassName := tryAppPasswordLogin(r.Context(), ds, username, password)
+	user, appPassID, appPassName, appPassSecret := tryAppPasswordLogin(r.Context(), ds, username, password)
 	if user == nil {
 		var err error
 		user, err = ValidateLogin(ds.User(r.Context()), username, password)
@@ -85,12 +85,12 @@ func doLogin(ds model.DataStore, username string, password string, w http.Respon
 		_ = rest.RespondWithError(w, http.StatusInternalServerError, "Unknown error authenticating user. Please try again")
 		return
 	}
-	payload := buildAuthPayload(user)
+	payload := buildAuthPayload(user, appPassSecret)
 	payload["token"] = tokenString
 	_ = rest.RespondWithJSON(w, http.StatusOK, payload)
 }
 
-func buildAuthPayload(user *model.User) map[string]any {
+func buildAuthPayload(user *model.User, subsonicPassword string) map[string]any {
 	payload := map[string]any{
 		"id":       user.ID,
 		"name":     user.Name,
@@ -110,7 +110,19 @@ func buildAuthPayload(user *model.User) map[string]any {
 	subsonicSalt := hex.EncodeToString(bytes)
 	payload["subsonicSalt"] = subsonicSalt
 
-	subsonicToken := md5.Sum([]byte(user.Password + subsonicSalt))
+	// The Subsonic salt+token protocol needs a recoverable plaintext: the
+	// client echoes back md5(secret+salt), which the Subsonic middleware's
+	// matchAppPassword recomputes to validate. For an app-password login
+	// (LDAP users), the secret the client will present at /rest is that app
+	// password, so derive the token from it — otherwise the client would
+	// resend a token the middleware can't match, getting a 40 on every
+	// /rest call. Otherwise fall back to the user's main password (empty for
+	// LDAP directory logins, which can't use the Subsonic API anyway).
+	pwd := subsonicPassword
+	if pwd == "" {
+		pwd = user.Password
+	}
+	subsonicToken := md5.Sum([]byte(pwd + subsonicSalt))
 	payload["subsonicToken"] = hex.EncodeToString(subsonicToken[:])
 
 	return payload
@@ -124,21 +136,24 @@ func buildAuthPayload(user *model.User) map[string]any {
 // FindActiveByUser (which performs the AES-GCM decryption) and the same
 // plaintext comparison as server/subsonic/middlewares.go:matchAppPassword, so
 // no new hashing/comparison scheme is introduced. Non-LDAP users are
-// unaffected. Returns (user, appPassID, appPassName) on a match, or
-// (nil, "", "") otherwise so the caller falls through to ValidateLogin /
-// the LDAP bind.
-func tryAppPasswordLogin(ctx context.Context, ds model.DataStore, username, password string) (*model.User, string, string) {
+// unaffected. On a match it returns (user, appPassID, appPassName,
+// appPassSecret) — the plaintext secret is needed downstream so the login
+// response's subsonicToken is derived from that app password (not the user's
+// empty directory password), letting the client's subsequent /rest salt+token
+// calls verify. Returns (nil, "", "", "") otherwise so the caller falls
+// through to ValidateLogin / the LDAP bind.
+func tryAppPasswordLogin(ctx context.Context, ds model.DataStore, username, password string) (*model.User, string, string, string) {
 	if password == "" {
-		return nil, "", ""
+		return nil, "", "", ""
 	}
 	u, err := ds.User(ctx).FindByUsername(username)
 	if err != nil || !u.IsLDAP() {
-		return nil, "", ""
+		return nil, "", "", ""
 	}
 	active, err := ds.AppPassword(ctx).FindActiveByUser(u.ID)
 	if err != nil {
 		log.Warn(ctx, "Error loading app passwords", "username", username, err)
-		return nil, "", ""
+		return nil, "", "", ""
 	}
 	for _, ap := range active {
 		if password == ap.Password {
@@ -146,16 +161,17 @@ func tryAppPasswordLogin(ctx context.Context, ds model.DataStore, username, pass
 				log.Warn(ctx, "Failed to bump app password last_used_at", "id", ap.ID, "username", username, touchErr)
 			}
 			// LDAP users carry no directory password; mirror the scrub done
-			// in validateLoginLDAP so buildAuthPayload's subsonicToken is
-			// computed over an empty value, consistent with a normal login.
+			// in validateLoginLDAP so callers don't see a stale value in
+			// u.Password. The app password plaintext is returned separately
+			// (never stored on the user) for subsonicToken derivation.
 			u.Password = ""
 			if err := ds.User(ctx).UpdateLastLoginAt(u.ID); err != nil {
 				log.Error(ctx, "Could not update LastLoginAt", "user", username, err)
 			}
-			return u, ap.ID, ap.Name
+			return u, ap.ID, ap.Name, ap.Password
 		}
 	}
-	return nil, "", ""
+	return nil, "", "", ""
 }
 
 func getCredentialsFromBody(r *http.Request) (username string, password string, err error) {
@@ -557,7 +573,7 @@ func handleLoginFromHeaders(ds model.DataStore, r *http.Request) map[string]any 
 		return nil
 	}
 
-	return buildAuthPayload(user)
+	return buildAuthPayload(user, "")
 }
 
 func validateIPAgainstList(ip string, comaSeparatedList string) bool {
