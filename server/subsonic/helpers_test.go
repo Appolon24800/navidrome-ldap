@@ -22,6 +22,7 @@ var _ = Describe("helpers", func() {
 	BeforeEach(func() {
 		DeferCleanup(configtest.SetupConfig())
 		auth.TokenAuth = jwtauth.New("HS256", []byte("test secret"), nil)
+		auth.PublicTokenAuth = jwtauth.New("HS256", []byte("test public secret"), nil)
 	})
 
 	Describe("fakePath", func() {
@@ -316,6 +317,82 @@ var _ = Describe("helpers", func() {
 				mf.Title = ""
 				child := childFromMediaFile(ctx, mf)
 				Expect(child.Title).To(Equal(""))
+			})
+		})
+	})
+
+	Describe("artwork coverArt emission", func() {
+		const hash = "0123456789abcdef"
+		ctx := context.Background()
+
+		DescribeTable("coverArtOrEmpty",
+			func(id model.ArtworkID, absent bool, expected string) {
+				Expect(coverArtOrEmpty(id, absent)).To(Equal(expected))
+			},
+			Entry("emits the bare id when unresolved", model.ArtworkID{Kind: model.KindAlbumArtwork, ID: "1"}, false, "al-1"),
+			Entry("emits the hash-suffixed id when resolved", model.ArtworkID{Kind: model.KindAlbumArtwork, ID: "1", Hash: hash}, false, "al-1_"+hash),
+			Entry("omits (empty) when known absent", model.ArtworkID{Kind: model.KindAlbumArtwork, ID: "1", Hash: hash}, true, ""),
+		)
+
+		Describe("childFromAlbum", func() {
+			It("suffixes coverArt with the content hash when resolved", func() {
+				al := model.Album{ID: "al-1", ItemImage: model.ItemImage{ImageHash: hash}}
+				Expect(childFromAlbum(ctx, al).CoverArt).To(Equal("al-al-1_" + hash))
+			})
+			It("omits coverArt when known absent", func() {
+				al := model.Album{ID: "al-1", ItemImage: model.ItemImage{ImageAbsent: true}}
+				Expect(childFromAlbum(ctx, al).CoverArt).To(BeEmpty())
+			})
+			It("emits the bare id when unresolved", func() {
+				al := model.Album{ID: "al-1"}
+				Expect(childFromAlbum(ctx, al).CoverArt).To(Equal("al-al-1"))
+			})
+		})
+
+		Describe("childFromMediaFile", func() {
+			// An al- id must carry the album's hash (AlbumImage), never the track's own.
+			It("suffixes coverArt with the album's content hash when resolved", func() {
+				mf := model.MediaFile{ID: "mf-1", AlbumID: "al-1", AlbumImage: model.ItemImage{ImageHash: hash}}
+				Expect(childFromMediaFile(ctx, mf).CoverArt).To(Equal("al-al-1_" + hash))
+			})
+
+			It("does not stamp a track's own art hash onto the album id", func() {
+				mf := model.MediaFile{ID: "mf-1", AlbumID: "al-1",
+					ItemImage:  model.ItemImage{ImageHash: "0000ownarthash00"},
+					AlbumImage: model.ItemImage{ImageHash: hash}}
+				Expect(childFromMediaFile(ctx, mf).CoverArt).To(Equal("al-al-1_" + hash))
+			})
+			It("omits coverArt when known absent", func() {
+				mf := model.MediaFile{ID: "mf-1", AlbumID: "al-1", ItemImage: model.ItemImage{ImageAbsent: true}}
+				Expect(childFromMediaFile(ctx, mf).CoverArt).To(BeEmpty())
+			})
+			It("emits the bare id when unresolved", func() {
+				mf := model.MediaFile{ID: "mf-1", AlbumID: "al-1"}
+				Expect(childFromMediaFile(ctx, mf).CoverArt).To(Equal("al-al-1"))
+			})
+		})
+
+		Describe("toArtist / toArtistID3", func() {
+			r := httptest.NewRequest("GET", "/test", nil)
+			It("emits both coverArt and imageUrl when resolved", func() {
+				a := model.Artist{ID: "ar-1", ItemImage: model.ItemImage{ImageHash: hash}}
+				artist := toArtist(r, a)
+				Expect(artist.CoverArt).To(Equal("ar-ar-1_" + hash))
+				Expect(artist.ArtistImageUrl).ToNot(BeEmpty())
+			})
+			It("omits coverArt and imageUrl when known absent", func() {
+				a := model.Artist{ID: "ar-1", ItemImage: model.ItemImage{ImageAbsent: true}}
+				artist := toArtist(r, a)
+				Expect(artist.CoverArt).To(BeEmpty())
+				Expect(artist.ArtistImageUrl).To(BeEmpty())
+
+				id3 := toArtistID3(r, a)
+				Expect(id3.CoverArt).To(BeEmpty())
+				Expect(id3.ArtistImageUrl).To(BeEmpty())
+			})
+			It("emits an imageUrl when unresolved", func() {
+				a := model.Artist{ID: "ar-1"}
+				Expect(toArtist(r, a).ArtistImageUrl).ToNot(BeEmpty())
 			})
 		})
 	})
@@ -619,31 +696,122 @@ var _ = Describe("helpers", func() {
 		})
 
 		Describe("buildAlbumID3 Created field", func() {
-			It("uses CreatedAt when set", func() {
-				t := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
-				al := model.Album{ID: "a1", Name: "A", CreatedAt: t}
-				dir := buildAlbumID3(ctx, al)
-				Expect(dir.Created).To(Equal(t))
+			When("RecentlyAddedByModTime is false", func() {
+				BeforeEach(func() {
+					conf.Server.RecentlyAddedByModTime = false
+				})
+
+				It("uses CreatedAt when set", func() {
+					t := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+					al := model.Album{ID: "a1", Name: "A", CreatedAt: t}
+					dir := buildAlbumID3(ctx, al)
+					Expect(dir.Created).To(Equal(t))
+				})
+
+				It("falls back to UpdatedAt when CreatedAt is zero", func() {
+					updated := time.Date(2019, 5, 6, 7, 8, 9, 0, time.UTC)
+					al := model.Album{ID: "a2", Name: "A", UpdatedAt: updated}
+					dir := buildAlbumID3(ctx, al)
+					Expect(dir.Created).To(Equal(updated))
+				})
+
+				It("falls back to ImportedAt when CreatedAt and UpdatedAt are zero", func() {
+					imported := time.Date(2021, 8, 9, 10, 11, 12, 0, time.UTC)
+					al := model.Album{ID: "a3", Name: "A", ImportedAt: imported}
+					dir := buildAlbumID3(ctx, al)
+					Expect(dir.Created).To(Equal(imported))
+				})
+
+				It("leaves Created as zero time when all timestamps are zero", func() {
+					al := model.Album{ID: "a4", Name: "A"}
+					dir := buildAlbumID3(ctx, al)
+					Expect(dir.Created.IsZero()).To(BeTrue())
+				})
 			})
 
-			It("falls back to UpdatedAt when CreatedAt is zero", func() {
-				updated := time.Date(2019, 5, 6, 7, 8, 9, 0, time.UTC)
-				al := model.Album{ID: "a2", Name: "A", UpdatedAt: updated}
-				dir := buildAlbumID3(ctx, al)
-				Expect(dir.Created).To(Equal(updated))
+			When("RecentlyAddedByModTime is true", func() {
+				BeforeEach(func() {
+					conf.Server.RecentlyAddedByModTime = true
+				})
+
+				It("uses UpdatedAt even when CreatedAt is also set", func() {
+					created := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+					updated := time.Date(2022, 6, 7, 8, 9, 10, 0, time.UTC)
+					al := model.Album{ID: "a5", Name: "A", CreatedAt: created, UpdatedAt: updated}
+					dir := buildAlbumID3(ctx, al)
+					Expect(dir.Created).To(Equal(updated))
+				})
+
+				It("falls back to CreatedAt when UpdatedAt is zero", func() {
+					created := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+					al := model.Album{ID: "a6", Name: "A", CreatedAt: created}
+					dir := buildAlbumID3(ctx, al)
+					Expect(dir.Created).To(Equal(created))
+				})
+
+				It("falls back to ImportedAt when UpdatedAt and CreatedAt are zero", func() {
+					imported := time.Date(2021, 8, 9, 10, 11, 12, 0, time.UTC)
+					al := model.Album{ID: "a7", Name: "A", ImportedAt: imported}
+					dir := buildAlbumID3(ctx, al)
+					Expect(dir.Created).To(Equal(imported))
+				})
+
+				It("leaves Created as zero time when all timestamps are zero", func() {
+					al := model.Album{ID: "a8", Name: "A"}
+					dir := buildAlbumID3(ctx, al)
+					Expect(dir.Created.IsZero()).To(BeTrue())
+				})
+			})
+		})
+
+		Describe("childFromMediaFile Created field", func() {
+			birth := time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC)
+
+			When("RecentlyAddedByModTime is false", func() {
+				BeforeEach(func() {
+					conf.Server.RecentlyAddedByModTime = false
+				})
+
+				It("uses CreatedAt, not BirthTime", func() {
+					created := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+					mf := model.MediaFile{ID: "s1", BirthTime: birth, CreatedAt: created}
+					child := childFromMediaFile(ctx, mf)
+					Expect(*child.Created).To(Equal(created))
+				})
+
+				It("falls back to UpdatedAt when CreatedAt is zero", func() {
+					updated := time.Date(2019, 5, 6, 7, 8, 9, 0, time.UTC)
+					mf := model.MediaFile{ID: "s2", BirthTime: birth, UpdatedAt: updated}
+					child := childFromMediaFile(ctx, mf)
+					Expect(*child.Created).To(Equal(updated))
+				})
+
+				It("falls back to BirthTime when CreatedAt and UpdatedAt are zero", func() {
+					mf := model.MediaFile{ID: "s3", BirthTime: birth}
+					child := childFromMediaFile(ctx, mf)
+					Expect(*child.Created).To(Equal(birth))
+				})
 			})
 
-			It("falls back to ImportedAt when CreatedAt and UpdatedAt are zero", func() {
-				imported := time.Date(2021, 8, 9, 10, 11, 12, 0, time.UTC)
-				al := model.Album{ID: "a3", Name: "A", ImportedAt: imported}
-				dir := buildAlbumID3(ctx, al)
-				Expect(dir.Created).To(Equal(imported))
-			})
+			When("RecentlyAddedByModTime is true", func() {
+				BeforeEach(func() {
+					conf.Server.RecentlyAddedByModTime = true
+				})
 
-			It("leaves Created as zero time when all timestamps are zero", func() {
-				al := model.Album{ID: "a4", Name: "A"}
-				dir := buildAlbumID3(ctx, al)
-				Expect(dir.Created.IsZero()).To(BeTrue())
+				It("uses UpdatedAt even when CreatedAt is also set", func() {
+					created := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+					updated := time.Date(2022, 6, 7, 8, 9, 10, 0, time.UTC)
+					mf := model.MediaFile{ID: "s4", BirthTime: birth, CreatedAt: created, UpdatedAt: updated}
+					child := childFromMediaFile(ctx, mf)
+					Expect(*child.Created).To(Equal(updated))
+				})
+
+				It("falls back to CreatedAt when UpdatedAt is zero", func() {
+					created := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+					mf := model.MediaFile{ID: "s5", BirthTime: birth, CreatedAt: created}
+					child := childFromMediaFile(ctx, mf)
+					Expect(*child.Created).To(Equal(created))
+				})
 			})
 		})
 

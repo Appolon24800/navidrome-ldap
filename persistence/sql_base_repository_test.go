@@ -92,14 +92,28 @@ var _ = Describe("sqlRepository", func() {
 				Expect(sort).To(BeEmpty())
 			})
 
-			It("returns the mapped value when sort key exists", func() {
+			// Validation only: buildSortOrder resolves the mapping, so mapping here too would hand
+			// sortMapping its own output and re-map values whose parts are themselves keys.
+			It("accepts a known sort key without resolving it", func() {
 				sort, _ := r.sanitizeSort("sort1", "")
-				Expect(sort).To(Equal("mappedSort1"))
+				Expect(sort).To(Equal("sort1"))
 			})
 
 			It("is case insensitive", func() {
 				sort, _ := r.sanitizeSort("Sort1", "")
-				Expect(sort).To(Equal("mappedSort1"))
+				Expect(sort).To(Equal("sort1"))
+			})
+
+			It("still resolves the mapping by the time the SQL is built", func() {
+				Expect(r.buildSortOrder("sort1", "asc")).To(Equal("mappedSort1 asc"))
+			})
+
+			// A mapping whose parts are themselves keys (media_file rated_at = "rating, rated_at")
+			// must survive the round trip through sanitizeSort and buildSortOrder unduplicated.
+			It("does not re-map a value whose parts are also keys", func() {
+				r.sortMappings = map[string]string{"rating": "rating", "rated_at": "rating, rated_at"}
+				sort, _ := r.sanitizeSort("rated_at", "")
+				Expect(r.buildSortOrder(sort, "asc")).To(Equal("rating asc, rated_at asc"))
 			})
 
 			It("returns the field if it is a valid field", func() {
@@ -132,6 +146,45 @@ var _ = Describe("sqlRepository", func() {
 				_, order := r.sanitizeSort("", "something")
 				Expect(order).To(Equal("asc"))
 			})
+		})
+	})
+
+	Describe("sortMapping", func() {
+		BeforeEach(func() {
+			r.sortMappings = map[string]string{
+				"name":           "order_album_name, order_album_artist_name",
+				"recently_added": "album.created_at, album.id",
+			}
+		})
+		It("maps a single key", func() {
+			Expect(r.sortMapping("recently_added")).To(Equal("album.created_at, album.id"))
+		})
+		It("maps every part of a comma list when all of them are known keys", func() {
+			Expect(r.sortMapping("recently_added, name")).
+				To(Equal("album.created_at, album.id, order_album_name, order_album_artist_name"))
+		})
+		It("resolves the known parts of a mixed list and leaves the rest as columns", func() {
+			Expect(r.sortMapping("recently_added, play_count")).
+				To(Equal("album.created_at, album.id, play_count"))
+		})
+		// Jellyfin's MusicAlbum SortBy=Runtime,SortName arrives as "duration, name"; duration is a
+		// plain album column while name is mapped, and the mapping must survive the mix.
+		It("keeps a mapping when an earlier part is a plain column", func() {
+			Expect(r.sortMapping("duration, name")).
+				To(Equal("duration, order_album_name, order_album_artist_name"))
+		})
+		It("leaves a raw column list with directions untouched", func() {
+			Expect(r.sortMapping("starred desc, rating desc")).To(Equal("starred desc, rating desc"))
+		})
+		It("does not split an expression on a comma inside its parentheses", func() {
+			Expect(r.sortMapping("coalesce(name, ''), title")).To(Equal("coalesce(name, ''), title"))
+			Expect(r.sortMapping("coalesce(nullif(a,''), b) desc, c")).To(Equal("coalesce(nullif(a,''), b) desc, c"))
+		})
+		It("keeps a mapping whose value nests commas inside parentheses", func() {
+			r.sortMappings["max_year"] = "coalesce(nullif(original_date,''), cast(max_year as text)), release_date"
+			Expect(r.sortMapping("max_year, name")).To(Equal(
+				"coalesce(nullif(original_date,''), cast(max_year as text)), release_date, " +
+					"order_album_name, order_album_artist_name"))
 		})
 	})
 
@@ -226,9 +279,21 @@ var _ = Describe("sqlRepository", func() {
 
 	Describe("applyLibraryFilter", func() {
 		var sq squirrel.SelectBuilder
+		var savedDB = r.db
 
 		BeforeEach(func() {
 			sq = squirrel.Select("*").From("test_table")
+			// Add library 2 so a user granted only library 1 is a genuine strict subset.
+			savedDB = r.db
+			r.db = GetDBXBuilder()
+			_, err := r.db.NewQuery("INSERT OR IGNORE INTO library (id, name, path) VALUES (2, 'Lib 2', '/lib2')").Execute()
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		AfterEach(func() {
+			_, err := r.db.NewQuery("DELETE FROM library WHERE id = 2").Execute()
+			Expect(err).ToNot(HaveOccurred())
+			r.db = savedDB
 		})
 
 		Context("Admin User", func() {
@@ -238,28 +303,79 @@ var _ = Describe("sqlRepository", func() {
 
 			It("should not apply library filter for admin users", func() {
 				result := r.applyLibraryFilter(sq)
-				sql, _, _ := result.ToSql()
+				sql, _, err := result.ToSql()
+				Expect(err).ToNot(HaveOccurred())
 				Expect(sql).To(Equal("SELECT * FROM test_table"))
 			})
 		})
 
-		Context("Regular User", func() {
+		Context("Regular User with a subset of libraries", func() {
 			BeforeEach(func() {
-				r.ctx = request.WithUser(context.Background(), model.User{ID: "user123", IsAdmin: false})
+				// Strict subset: granted lib 1, DB has libs 1 and 2, so the filter must apply.
+				r.ctx = request.WithUser(context.Background(), model.User{
+					ID: "user123", IsAdmin: false, Libraries: model.Libraries{{ID: 1}},
+				})
 			})
 
 			It("should apply library filter for regular users", func() {
 				result := r.applyLibraryFilter(sq)
-				sql, args, _ := result.ToSql()
+				sql, args, err := result.ToSql()
+				Expect(err).ToNot(HaveOccurred())
 				Expect(sql).To(ContainSubstring("IN (SELECT ul.library_id FROM user_library ul WHERE ul.user_id = ?)"))
 				Expect(args).To(ContainElement("user123"))
 			})
 
 			It("should use custom table name when provided", func() {
 				result := r.applyLibraryFilter(sq, "custom_table")
-				sql, args, _ := result.ToSql()
+				sql, args, err := result.ToSql()
+				Expect(err).ToNot(HaveOccurred())
 				Expect(sql).To(ContainSubstring("custom_table.library_id IN"))
 				Expect(args).To(ContainElement("user123"))
+			})
+		})
+
+		Context("Regular User with no libraries", func() {
+			BeforeEach(func() {
+				r.ctx = request.WithUser(context.Background(), model.User{ID: "empty", IsAdmin: false})
+			})
+
+			It("should apply the library filter (never skip on empty)", func() {
+				result := r.applyLibraryFilter(sq)
+				sql, _, err := result.ToSql()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sql).To(ContainSubstring("IN (SELECT ul.library_id FROM user_library ul WHERE ul.user_id = ?)"))
+			})
+		})
+
+		Context("Regular User who can see all libraries", func() {
+			BeforeEach(func() {
+				// Grant every library that currently exists in the (shared) DB, so the filter
+				// would exclude nothing. Querying the real IDs keeps this correct even if other
+				// specs left extra libraries behind, which happens under Ginkgo's randomized order.
+				var ids []int
+				err := r.db.NewQuery("SELECT id FROM library ORDER BY id").Column(&ids)
+				Expect(err).ToNot(HaveOccurred())
+				libs := make(model.Libraries, 0, len(ids))
+				for _, id := range ids {
+					libs = append(libs, model.Library{ID: id})
+				}
+				r.ctx = request.WithUser(context.Background(), model.User{
+					ID: "alllibs", IsAdmin: false, Libraries: libs,
+				})
+			})
+
+			It("should not apply the library filter (subquery would filter nothing)", func() {
+				result := r.applyLibraryFilter(sq)
+				sql, _, err := result.ToSql()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sql).To(Equal("SELECT * FROM test_table"))
+			})
+
+			It("should not apply the filter even with a custom table name", func() {
+				result := r.applyLibraryFilter(sq, "custom_table")
+				sql, _, err := result.ToSql()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sql).To(Equal("SELECT * FROM test_table"))
 			})
 		})
 
@@ -270,13 +386,15 @@ var _ = Describe("sqlRepository", func() {
 
 			It("should not apply library filter for headless processes", func() {
 				result := r.applyLibraryFilter(sq)
-				sql, _, _ := result.ToSql()
+				sql, _, err := result.ToSql()
+				Expect(err).ToNot(HaveOccurred())
 				Expect(sql).To(Equal("SELECT * FROM test_table"))
 			})
 
 			It("should not apply library filter even with custom table name", func() {
 				result := r.applyLibraryFilter(sq, "custom_table")
-				sql, _, _ := result.ToSql()
+				sql, _, err := result.ToSql()
+				Expect(err).ToNot(HaveOccurred())
 				Expect(sql).To(Equal("SELECT * FROM test_table"))
 			})
 		})

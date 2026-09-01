@@ -9,7 +9,7 @@ export ND_ENABLEINSIGHTSCOLLECTOR=false
 
 ifneq ("$(wildcard .git/HEAD)","")
 GIT_SHA=$(shell git rev-parse --short HEAD)
-GIT_TAG=$(shell git describe --tags `git rev-list --tags --max-count=1`)-SNAPSHOT
+GIT_TAG=$(shell git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)-SNAPSHOT
 else
 GIT_SHA=source_archive
 GIT_TAG=$(patsubst navidrome-%,v%,$(notdir $(PWD)))-SNAPSHOT
@@ -20,7 +20,7 @@ IMAGE_PLATFORMS ?= $(shell echo $(SUPPORTED_PLATFORMS) | tr ',' '\n' | grep "lin
 PLATFORMS ?= $(SUPPORTED_PLATFORMS)
 DOCKER_TAG ?= deluan/navidrome:develop
 
-GOLANGCI_LINT_VERSION ?= v2.12.0
+GOLANGCI_LINT_VERSION ?= v2.13.2
 
 UI_SRC_FILES := $(shell find ui -type f -not -path "ui/build/*" -not -path "ui/node_modules/*")
 
@@ -113,10 +113,11 @@ wire: check_go_env ##@Development Update Dependency Injection
 
 gen: check_go_env ##@Development Run go generate for code generation
 	go generate ./...
-	cd plugins/cmd/ndpgen && go run . -host-wrappers -input=../../host -package=host
-	cd plugins/cmd/ndpgen && go run . -input=../../host -output=../../pdk -go -python -rust
-	cd plugins/cmd/ndpgen && go run . -capability-only -input=../../capabilities -output=../../pdk -go -rust
-	cd plugins/cmd/ndpgen && go run . -schemas -input=../../capabilities
+	cd plugins/cmd/ndpgen && go run . -shared-types -input=../../types -output=../../pdk -go -rust
+	cd plugins/cmd/ndpgen && go run . -host-wrappers -input=../../host -package=host -shared=../../types
+	cd plugins/cmd/ndpgen && go run . -input=../../host -output=../../pdk -go -rust -shared=../../types
+	cd plugins/cmd/ndpgen && go run . -capability-only -input=../../capabilities -output=../../pdk -go -rust -shared=../../types
+	cd plugins/cmd/ndpgen && go run . -schemas -input=../../capabilities -shared=../../types
 	go mod tidy -C plugins/pdk/go
 .PHONY: gen
 

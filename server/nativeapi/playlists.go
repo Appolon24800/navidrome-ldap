@@ -20,6 +20,20 @@ import (
 
 type restHandler = func(rest.RepositoryConstructor, ...rest.Logger) http.HandlerFunc
 
+// writePlaylistError maps a playlist service error to an HTTP status, or defaultStatus if unknown.
+func writePlaylistError(w http.ResponseWriter, err error, defaultStatus int) {
+	switch {
+	case errors.Is(err, model.ErrNotFound):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, model.ErrNotAuthorized):
+		http.Error(w, err.Error(), http.StatusForbidden)
+	case errors.Is(err, model.ErrPlaylistNotEditable):
+		http.Error(w, err.Error(), http.StatusConflict)
+	default:
+		http.Error(w, err.Error(), defaultStatus)
+	}
+}
+
 func playlistTracksHandler(pls playlists.Playlists, handler restHandler, refreshSmartPlaylist func(*http.Request) bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		plsId := chi.URLParam(r, "playlistId")
@@ -102,7 +116,7 @@ func deleteFromPlaylist(pls playlists.Playlists) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p := req.Params(r)
 		playlistId, _ := p.String(":playlistId")
-		ids, _ := p.Strings("id")
+		ids := p.Strings("id")
 		err := pls.RemoveTracks(r.Context(), playlistId, ids)
 		if len(ids) == 1 && errors.Is(err, model.ErrNotFound) {
 			log.Warn(r.Context(), "Track not found in playlist", "playlistId", playlistId, "id", ids[0])
@@ -111,7 +125,7 @@ func deleteFromPlaylist(pls playlists.Playlists) http.HandlerFunc {
 		}
 		if err != nil {
 			log.Error(r.Context(), "Error deleting tracks from playlist", "playlistId", playlistId, "ids", ids, err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writePlaylistError(w, err, http.StatusInternalServerError)
 			return
 		}
 		writeDeleteManyResponse(w, r, ids)
@@ -138,22 +152,22 @@ func addToPlaylist(pls playlists.Playlists) http.HandlerFunc {
 		}
 		count, c := 0, 0
 		if c, err = pls.AddTracks(ctx, playlistId, payload.Ids); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writePlaylistError(w, err, http.StatusBadRequest)
 			return
 		}
 		count += c
 		if c, err = pls.AddAlbums(ctx, playlistId, payload.AlbumIds); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writePlaylistError(w, err, http.StatusBadRequest)
 			return
 		}
 		count += c
 		if c, err = pls.AddArtists(ctx, playlistId, payload.ArtistIds); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writePlaylistError(w, err, http.StatusBadRequest)
 			return
 		}
 		count += c
 		if c, err = pls.AddDiscs(ctx, playlistId, payload.Discs); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writePlaylistError(w, err, http.StatusBadRequest)
 			return
 		}
 		count += c
@@ -192,12 +206,8 @@ func reorderItem(pls playlists.Playlists) http.HandlerFunc {
 			return
 		}
 		err = pls.ReorderTrack(ctx, playlistId, id, newPos)
-		if errors.Is(err, model.ErrNotAuthorized) {
-			http.Error(w, err.Error(), http.StatusForbidden)
-			return
-		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writePlaylistError(w, err, http.StatusBadRequest)
 			return
 		}
 

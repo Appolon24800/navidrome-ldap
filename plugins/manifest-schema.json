@@ -34,9 +34,6 @@
     "permissions": {
       "$ref": "#/$defs/Permissions"
     },
-    "experimental": {
-      "$ref": "#/$defs/Experimental"
-    },
     "config": {
       "$ref": "#/$defs/ConfigDefinition"
     }
@@ -55,27 +52,6 @@
         "uiSchema": {
           "type": "object",
           "description": "Optional JSONForms UI Schema for customizing form layout"
-        }
-      }
-    },
-    "Experimental": {
-      "type": "object",
-      "description": "Experimental features that may change or be removed in future versions",
-      "additionalProperties": false,
-      "properties": {
-        "threads": {
-          "$ref": "#/$defs/ThreadsFeature"
-        }
-      }
-    },
-    "ThreadsFeature": {
-      "type": "object",
-      "description": "Enable experimental WebAssembly threads support",
-      "additionalProperties": false,
-      "properties": {
-        "reason": {
-          "type": "string",
-          "description": "Explanation for why threads support is needed"
         }
       }
     },
@@ -113,6 +89,15 @@
         },
         "taskqueue": {
           "$ref": "#/$defs/TaskQueuePermission"
+        },
+        "matcher": {
+          "$ref": "#/$defs/MatcherPermission"
+        },
+        "storage": {
+          "$ref": "#/$defs/StoragePermission"
+        },
+        "scrobbleRetriever": {
+          "$ref": "#/$defs/ScrobbleRetrieverPermission"
         }
       }
     },
@@ -252,6 +237,39 @@
         "reason": {
           "type": "string",
           "description": "Explanation for why users access is needed"
+        }
+      }
+    },
+    "MatcherPermission": {
+      "type": "object",
+      "description": "Matcher service permissions for resolving external songs to local library tracks",
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "Explanation for why matcher access is needed"
+        }
+      }
+    },
+    "StoragePermission": {
+      "type": "object",
+      "description": "Storage permissions for enabling persistent read-write storage exclusively for the plugin",
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "Explanation for why storage access is needed"
+        }
+      }
+    },
+    "ScrobbleRetrieverPermission": {
+      "type": "object",
+      "description": "Scrobble retriever permissions for retrieving scrobbles from users",
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "Explanation for why scrobble retriever access is needed"
         }
       }
     }

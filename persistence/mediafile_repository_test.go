@@ -13,6 +13,7 @@ import (
 	"github.com/navidrome/navidrome/conf/configtest"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/model/criteria"
 	"github.com/navidrome/navidrome/model/id"
 	"github.com/navidrome/navidrome/model/request"
 	. "github.com/onsi/ginkgo/v2"
@@ -29,6 +30,70 @@ var _ = Describe("MediaRepository", func() {
 		mr = NewMediaFileRepository(ctx, GetDBXBuilder())
 	})
 
+	Describe("GetAlbumIDsByFolder", func() {
+		var lib model.Library
+		var albumRoot, disc1, sibling *model.Folder
+
+		BeforeEach(func() {
+			ctx := request.WithUser(log.NewContext(context.TODO()), model.User{ID: "userid"})
+			libPtr, err := NewLibraryRepository(ctx, GetDBXBuilder()).Get(1)
+			Expect(err).ToNot(HaveOccurred())
+			lib = *libPtr
+
+			folderRepo := newFolderRepository(ctx, GetDBXBuilder())
+			albumRoot = model.NewFolder(lib, "ByFolder/Album")
+			disc1 = model.NewFolder(lib, "ByFolder/Album/CD1")
+			sibling = model.NewFolder(lib, "ByFolder/Other")
+			for _, f := range []*model.Folder{albumRoot, disc1, sibling} {
+				Expect(folderRepo.Put(f)).To(Succeed())
+			}
+			// Tracks live in the disc subfolder; the sibling album is the negative control.
+			Expect(mr.Put(&model.MediaFile{ID: "fol-mf-1", LibraryID: 1, AlbumID: "fol-al-1", FolderID: disc1.ID, Path: "t/1.mp3"})).To(Succeed())
+			Expect(mr.Put(&model.MediaFile{ID: "fol-mf-2", LibraryID: 1, AlbumID: "fol-al-1", FolderID: disc1.ID, Path: "t/2.mp3"})).To(Succeed())
+			Expect(mr.Put(&model.MediaFile{ID: "fol-mf-3", LibraryID: 1, AlbumID: "fol-al-2", FolderID: sibling.ID, Path: "t/3.mp3"})).To(Succeed())
+			Expect(mr.Put(&model.MediaFile{ID: "fol-mf-4", LibraryID: 1, AlbumID: "fol-al-3", FolderID: disc1.ID, Path: "t/4.mp3", Missing: true})).To(Succeed())
+			DeferCleanup(func() {
+				_, _ = GetDBXBuilder().NewQuery("DELETE FROM media_file WHERE id LIKE 'fol-mf-%'").Execute()
+				_, _ = GetDBXBuilder().NewQuery("DELETE FROM folder WHERE path LIKE 'ByFolder%' OR name = 'ByFolder'").Execute()
+			})
+		})
+
+		It("returns the distinct album IDs of non-missing tracks in the folder", func() {
+			ids, err := mr.GetAlbumIDsByFolder(lib, disc1.ID)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ids).To(ConsistOf("fol-al-1"))
+		})
+
+		It("also matches albums whose tracks are in a direct child of the folder", func() {
+			// A cover in the album root must reach the album whose tracks sit in CD1
+			ids, err := mr.GetAlbumIDsByFolder(lib, albumRoot.ID)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ids).To(ConsistOf("fol-al-1"))
+		})
+
+		It("does not match albums outside the folder", func() {
+			ids, err := mr.GetAlbumIDsByFolder(lib, albumRoot.ID)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ids).ToNot(ContainElement("fol-al-2"))
+		})
+	})
+
+	Describe("GetCursor", func() {
+		It("yields the same media files as GetAll", func() {
+			opts := model.QueryOptions{Sort: "title"}
+			want, err := mr.GetAll(opts)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(collectCursor(mr.GetCursor(opts))).To(Equal([]model.MediaFile(want)))
+		})
+
+		It("honors Max/Offset like GetAll", func() {
+			opts := model.QueryOptions{Sort: "title", Max: 2, Offset: 1}
+			want, err := mr.GetAll(opts)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(collectCursor(mr.GetCursor(opts))).To(Equal([]model.MediaFile(want)))
+		})
+	})
+
 	It("gets mediafile from the DB", func() {
 		actual, err := mr.Get("1004")
 		Expect(err).ToNot(HaveOccurred())
@@ -43,6 +108,37 @@ var _ = Describe("MediaRepository", func() {
 
 	It("counts the number of mediafiles in the DB", func() {
 		Expect(mr.CountAll()).To(Equal(int64(13)))
+	})
+
+	Describe("CountAll annotation-join gating", func() {
+		var adminRepo model.MediaFileRepository
+
+		BeforeEach(func() {
+			adminCtx := request.WithUser(log.NewContext(context.TODO()), model.User{ID: "userid", IsAdmin: true})
+			adminRepo = NewMediaFileRepository(adminCtx, GetDBXBuilder())
+		})
+
+		It("counts starred songs when an annotation filter is present", func() {
+			// Come Together (id 1002) is starred for the admin user in the seed data
+			count, err := adminRepo.CountAll(model.QueryOptions{
+				Filters: annotationBoolFilter("starred")("starred", "true"),
+			})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(count).To(Equal(int64(1)))
+		})
+
+		It("counts with starred=false without a 'no such column' error (join kept)", func() {
+			count, err := adminRepo.CountAll(model.QueryOptions{
+				Filters: annotationBoolFilter("starred")("starred", "false"),
+			})
+			Expect(err).ToNot(HaveOccurred())
+			// All songs except the one starred one
+			Expect(count).To(Equal(int64(12)))
+		})
+
+		It("counts unfiltered with the join dropped", func() {
+			Expect(adminRepo.CountAll()).To(Equal(int64(13)))
+		})
 	})
 
 	Describe("CountBySuffix", func() {
@@ -576,6 +672,34 @@ var _ = Describe("MediaRepository", func() {
 				})
 			})
 
+			It("breaks ties deterministically when files share the same created_at", func() {
+				conf.Server.RecentlyAddedByModTime = false
+				ctx := log.NewContext(GinkgoT().Context())
+				ctx = request.WithUser(ctx, model.User{ID: "userid"})
+				repo := NewMediaFileRepository(ctx, GetDBXBuilder())
+
+				ids := []string{testMediaFiles[0].ID, testMediaFiles[1].ID, testMediaFiles[2].ID}
+				sameTime := time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC)
+				_, err := GetDBXBuilder().Update("media_file",
+					dbx.Params{"created_at": sameTime},
+					dbx.In("id", ids[0], ids[1], ids[2])).Execute()
+				Expect(err).ToNot(HaveOccurred())
+
+				order := func() []string {
+					res, err := repo.GetAll(model.QueryOptions{
+						Sort: "recently_added", Order: "desc",
+						Filters: squirrel.Eq{"media_file.id": ids}})
+					Expect(err).ToNot(HaveOccurred())
+					out := make([]string, len(res))
+					for i, mf := range res {
+						out[i] = mf.ID
+					}
+					return out
+				}
+				// Stable across repeated queries (no query-plan-dependent reordering).
+				Expect(order()).To(Equal(order()))
+			})
+
 		})
 	})
 
@@ -931,6 +1055,28 @@ var _ = Describe("MediaRepository", func() {
 				Expect(results).To(HaveLen(1))
 				Expect(results[0].ID).To(Equal("otherlib-track"))
 			})
+
+			It("resolves paths from multiple libraries in a single call", func() {
+				adminMr := NewMediaFileRepository(request.WithUser(GinkgoT().Context(), adminUser), GetDBXBuilder())
+				results, err := adminMr.FindByPaths([]string{
+					"1:artist/Album/track.mp3",
+					fmt.Sprintf("%d:hidden/test.mp3", otherLib.ID),
+				})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(results).To(HaveLen(2))
+				Expect([]string{results[0].ID, results[1].ID}).To(ConsistOf("findpath-1", "otherlib-track"))
+			})
+
+			It("keeps each path scoped to its own library when several are queried", func() {
+				adminMr := NewMediaFileRepository(request.WithUser(GinkgoT().Context(), adminUser), GetDBXBuilder())
+				// Each path exists, but under the other library's ID, so neither must match.
+				results, err := adminMr.FindByPaths([]string{
+					fmt.Sprintf("%d:artist/Album/track.mp3", otherLib.ID),
+					"1:hidden/test.mp3",
+				})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(results).To(BeEmpty())
+			})
 		})
 	})
 
@@ -953,7 +1099,7 @@ var _ = Describe("MediaRepository", func() {
 				}
 			}).ToNot(Panic())
 			Expect(gotErr).To(HaveOccurred())
-			Expect(gotErr.Error()).To(ContainSubstring("unexpected nil mediafile"))
+			Expect(gotErr.Error()).To(ContainSubstring("unexpected nil model.MediaFile"))
 			Expect(errors.Is(gotErr, dbErr)).To(BeTrue(), "should wrap the original cursor error")
 		})
 
@@ -1016,6 +1162,69 @@ var _ = Describe("MediaRepository", func() {
 			Expect(*retrieved.BitDepth).To(Equal(24))
 
 			_ = mr.Delete(newID)
+		})
+	})
+
+	Describe("AlbumImage hydration", func() {
+		It("carries the parent album's artwork state onto each track", func() {
+			mfs := model.MediaFiles{{ID: "mf-1", AlbumID: "al-1"}}
+			infos := map[string]model.ItemArtworkInfo{
+				"al-1": {ItemID: "al-1", Hash: "0123456789abcdef", BlurHash: "LEHV6nWB2yk8"},
+			}
+			applyItemImage(infos, mfs[0].AlbumID, &mfs[0].AlbumImage)
+
+			Expect(mfs[0].AlbumImage.ImageHash).To(Equal("0123456789abcdef"))
+			Expect(mfs[0].AlbumImage.BlurHash).To(Equal("LEHV6nWB2yk8"))
+			Expect(mfs[0].AlbumImage.ImageAbsent).To(BeFalse())
+		})
+
+		It("keeps the album state independent of the track's own art", func() {
+			mf := model.MediaFile{ID: "mf-2", AlbumID: "al-2"}
+			mf.ImageHash = "aaaaaaaaaaaaaaaa" // the track's own art
+			applyItemImage(
+				map[string]model.ItemArtworkInfo{"al-2": {ItemID: "al-2", Hash: "bbbbbbbbbbbbbbbb"}},
+				mf.AlbumID, &mf.AlbumImage,
+			)
+			Expect(mf.ImageHash).To(Equal("aaaaaaaaaaaaaaaa"))
+			Expect(mf.AlbumImage.ImageHash).To(Equal("bbbbbbbbbbbbbbbb"))
+		})
+	})
+
+	// Exists must apply the same library filter as Get/GetAll/CountAll.
+	Describe("Exists library visibility", func() {
+		It("hides a track the user has no library access to", func() {
+			restricted := model.User{ID: "restricted_mf_user", UserName: "rm", Name: "RM", Email: "rm@t.com"}
+			rctx := request.WithUser(GinkgoT().Context(), restricted)
+
+			Expect(mr.Exists(songAntenna.ID)).To(BeTrue(), "admin sees it")
+			Expect(NewMediaFileRepository(rctx, GetDBXBuilder()).Exists(songAntenna.ID)).To(BeFalse())
+		})
+	})
+
+	Describe("MatchesCriteria", func() {
+		It("returns true when the track matches", func() {
+			c := criteria.Criteria{Expression: criteria.All{criteria.Contains{"title": "Day"}}}
+			match, err := mr.MatchesCriteria(songDayInALife.ID, c)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(match).To(BeTrue())
+		})
+		It("returns false when the track does not match", func() {
+			c := criteria.Criteria{Expression: criteria.All{criteria.Contains{"title": "Nickelback"}}}
+			match, err := mr.MatchesCriteria(songDayInALife.ID, c)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(match).To(BeFalse())
+		})
+		It("treats missing annotations as their COALESCE default", func() {
+			// unrated track: rating coalesces to 0, so "rating < 4" matches
+			c := criteria.Criteria{Expression: criteria.All{criteria.Lt{"rating": 4}}}
+			match, err := mr.MatchesCriteria(songDayInALife.ID, c)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(match).To(BeTrue())
+		})
+		It("returns an error for an invalid field", func() {
+			c := criteria.Criteria{Expression: criteria.All{criteria.Is{"bogusfield": 1}}}
+			_, err := mr.MatchesCriteria(songDayInALife.ID, c)
+			Expect(err).To(HaveOccurred())
 		})
 	})
 })

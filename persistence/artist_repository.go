@@ -19,6 +19,7 @@ import (
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/utils"
 	"github.com/navidrome/navidrome/utils/slice"
+	"github.com/navidrome/navidrome/utils/str"
 	"github.com/pocketbase/dbx"
 )
 
@@ -102,8 +103,10 @@ func (a *dbArtist) PostMapArgs(m map[string]any) error {
 	}
 	similarArtists, _ := json.Marshal(sa)
 	m["similar_artists"] = string(similarArtists)
+	// When adding a derived column here, also add it to the scanner's artist Put column list
+	// in phase_1_folders.go, or rescans will never update it (how search_normalized went stale).
 	m["full_text"] = formatFullText(a.Name, a.SortArtistName)
-	m["search_normalized"] = normalizeForFTS(a.Name)
+	m["search_normalized"] = str.NormalizeForFTS(a.Name)
 
 	// Do not override the sort_artist_name and mbz_artist_id fields if they are empty
 	// TODO: Better way to handle this?
@@ -201,7 +204,11 @@ func (r *artistRepository) selectArtist(options ...model.QueryOptions) SelectBui
 func (r *artistRepository) CountAll(options ...model.QueryOptions) (int64, error) {
 	query := r.newSelect()
 	query = r.applyLibraryFilterToArtistQuery(query)
-	query = r.withAnnotation(query, "artist.id")
+	// Only the annotation join is gated; the library_artist join above (and its count(distinct))
+	// must stay, since an artist can span multiple libraries.
+	if filtersNeedAnnotation(r.applyFilters(query, options...)) {
+		query = r.withAnnotation(query, "artist.id")
+	}
 	return r.count(query, options...)
 }
 
@@ -242,6 +249,7 @@ func (r *artistRepository) Get(id string) (*model.Artist, error) {
 		return nil, model.ErrNotFound
 	}
 	res := dba.toModels()
+	r.hydrateArtwork(res)
 	return &res[0], nil
 }
 
@@ -253,7 +261,37 @@ func (r *artistRepository) GetAll(options ...model.QueryOptions) (model.Artists,
 		return nil, err
 	}
 	res := dba.toModels()
+	r.hydrateArtwork(res)
 	return res, err
+}
+
+// GetAllIDs returns just the artist IDs for the same row set as GetAll, skipping the
+// heavy stats columns and JSON post-processing.
+func (r *artistRepository) GetAllIDs(options ...model.QueryOptions) ([]string, error) {
+	sq := r.applyLibraryFilterToArtistQuery(r.newSelect(options...).Columns("artist.id")).GroupBy("artist.id")
+	if filtersNeedAnnotation(sq) {
+		sq = r.withAnnotation(sq, "artist.id")
+	}
+	ids := []string{}
+	err := r.queryAllSlice(sq, &ids)
+	return ids, err
+}
+
+// hydrateArtwork fills each artist's ImageHash/ImageAbsent from one batched item_artwork lookup.
+func (r *artistRepository) hydrateArtwork(artists model.Artists) {
+	hydrateItems(r.ctx, r.db, model.KindArtistArtwork, artists,
+		func(a *model.Artist) (string, *model.ItemImage) { return a.ID, &a.ItemImage })
+}
+
+func (r *artistRepository) GetCursor(options ...model.QueryOptions) (model.ArtistCursor, error) {
+	ids, err := r.GetAllIDs(options...)
+	if err != nil {
+		return nil, err
+	}
+	opts := chunkOptions(options, "artist.id")
+	return model.ArtistCursor(streamByIDs(ids, func(chunk []string) (model.Artists, error) {
+		return r.GetAll(opts(chunk))
+	})), nil
 }
 
 func (r *artistRepository) getIndexKey(a model.Artist) string {
@@ -614,7 +652,9 @@ func (r *artistRepository) Search(q string, options ...model.QueryOptions) (mode
 	if err != nil {
 		return nil, fmt.Errorf("searching artist %q: %w", q, err)
 	}
-	return res.toModels(), nil
+	artists := res.toModels()
+	r.hydrateArtwork(artists)
+	return artists, nil
 }
 
 // searchScope returns the library IDs the search must be restricted to, or nil to skip the filter
@@ -662,32 +702,6 @@ func isLibraryIDFilter(filter Sqlizer) bool {
 	}
 	_, ok = eq["library_id"]
 	return ok
-}
-
-// userSeesAllLibraries reports whether the visible set already covers every library, so a search
-// needs no library filter at all.
-func (r *artistRepository) userSeesAllLibraries(visible []int) bool {
-	user := loggedUser(r.ctx)
-	if user.IsAdmin || user.ID == invalidUserId {
-		return true // visible is the whole library table
-	}
-	total, err := NewLibraryRepository(r.ctx, r.db).CountAll()
-	if err != nil || total == 0 {
-		return false
-	}
-	return int64(len(visible)) >= total
-}
-
-// visibleLibraryIDs returns the libraries the current user can see: all libraries for admin and
-// headless processes, otherwise the user's granted libraries.
-func (r *artistRepository) visibleLibraryIDs() ([]int, error) {
-	user := loggedUser(r.ctx)
-	if user.IsAdmin || user.ID == invalidUserId {
-		var ids []int
-		err := r.queryAllSlice(Select("id").From("library"), &ids)
-		return ids, err
-	}
-	return slice.Map(user.Libraries, func(lib model.Library) int { return lib.ID }), nil
 }
 
 func (r *artistRepository) Count(options ...rest.QueryOptions) (int64, error) {

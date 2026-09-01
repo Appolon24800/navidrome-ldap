@@ -11,7 +11,8 @@ import (
 type Claims struct {
 	// Standard JWT claims
 	Issuer    string
-	Subject   string // username for session tokens
+	Subject   string   // username for session tokens
+	Audience  []string // which API may accept this token; empty means any
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 
@@ -22,6 +23,7 @@ type Claims struct {
 	Format  string // "f" - audio format
 	BitRate int    // "b" - audio bitrate
 	ShareID string // "sid" - share ID for share stream tokens
+	Epoch   int    // "ep" - the user's token_epoch at mint time
 
 	// AppPasswordID/AppPasswordName ("apid"/"apnm") are set on session tokens
 	// issued via /auth/login when an LDAP-backed user authenticates with a
@@ -42,6 +44,9 @@ func (c Claims) ToMap() map[string]any {
 	}
 	if c.Subject != "" {
 		m[jwt.SubjectKey] = c.Subject
+	}
+	if len(c.Audience) > 0 {
+		m[jwt.AudienceKey] = c.Audience
 	}
 	if !c.IssuedAt.IsZero() {
 		m[jwt.IssuedAtKey] = c.IssuedAt.UTC().Unix()
@@ -67,6 +72,9 @@ func (c Claims) ToMap() map[string]any {
 	if c.ShareID != "" {
 		m["sid"] = c.ShareID
 	}
+	if c.Epoch != 0 {
+		m["ep"] = c.Epoch
+	}
 	if c.AppPasswordID != "" {
 		m["apid"] = c.AppPasswordID
 	}
@@ -88,6 +96,7 @@ func ClaimsFromToken(token jwt.Token) Claims {
 	c.Subject, _ = token.Subject()
 	c.IssuedAt, _ = token.IssuedAt()
 	c.ExpiresAt, _ = token.Expiration()
+	c.Audience, _ = token.Audience()
 
 	var uid string
 	if err := token.Get("uid", &uid); err == nil {
@@ -105,16 +114,12 @@ func ClaimsFromToken(token jwt.Token) Claims {
 	if err := token.Get("f", &f); err == nil {
 		c.Format = f
 	}
-	if err := token.Get("b", &c.BitRate); err != nil {
-		var bf float64
-		if err := token.Get("b", &bf); err == nil {
-			c.BitRate = int(bf)
-		}
-	}
+	c.BitRate = intClaim(token, "b")
 	var sid string
 	if err := token.Get("sid", &sid); err == nil {
 		c.ShareID = sid
 	}
+	c.Epoch = intClaim(token, "ep")
 	var apid string
 	if err := token.Get("apid", &apid); err == nil {
 		c.AppPasswordID = apid
@@ -124,4 +129,17 @@ func ClaimsFromToken(token jwt.Token) Claims {
 		c.AppPasswordName = apnm
 	}
 	return c
+}
+
+// intClaim reads a numeric claim, which a parsed token may decode as either int or float64.
+func intClaim(token jwt.Token, key string) int {
+	var i int
+	if err := token.Get(key, &i); err == nil {
+		return i
+	}
+	var f float64
+	if err := token.Get(key, &f); err == nil {
+		return int(f)
+	}
+	return 0
 }

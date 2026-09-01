@@ -9,6 +9,7 @@ import (
 
 	"github.com/deluan/rest"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/model/criteria"
 	"github.com/navidrome/navidrome/model/id"
 	"github.com/navidrome/navidrome/utils/slice"
 )
@@ -31,6 +32,8 @@ type MockMediaFileRepo struct {
 	// Add fields for cross-library move detection tests
 	FindRecentFilesByMBZTrackIDFunc func(missing model.MediaFile, since time.Time) (model.MediaFiles, error)
 	FindRecentFilesByPropertiesFunc func(missing model.MediaFile, since time.Time) (model.MediaFiles, error)
+	MatchesCriteriaValue            bool
+	MatchesCriteriaErr              error
 }
 
 func (m *MockMediaFileRepo) SetError(err bool) {
@@ -109,6 +112,32 @@ func (m *MockMediaFileRepo) GetRandom(qo ...model.QueryOptions) (model.MediaFile
 	return res, nil
 }
 
+func (m *MockMediaFileRepo) GetCursor(qo ...model.QueryOptions) (model.MediaFileCursor, error) {
+	res, err := m.GetAll(qo...)
+	if err != nil {
+		return nil, err
+	}
+	return func(yield func(model.MediaFile, error) bool) {
+		for _, mf := range res {
+			if !yield(mf, nil) {
+				return
+			}
+		}
+	}, nil
+}
+
+func (m *MockMediaFileRepo) GetCursorWithArtwork(qo ...model.QueryOptions) (model.MediaFileCursor, error) {
+	return m.GetCursor(qo...)
+}
+
+func (m *MockMediaFileRepo) GetAllIDs(qo ...model.QueryOptions) ([]string, error) {
+	all, err := m.GetAll(qo...)
+	if err != nil {
+		return nil, err
+	}
+	return slice.Map(all, func(mf model.MediaFile) string { return mf.ID }), nil
+}
+
 func (m *MockMediaFileRepo) Put(mf *model.MediaFile) error {
 	if m.Err {
 		return errors.New("error")
@@ -152,6 +181,28 @@ func (m *MockMediaFileRepo) IncPlayCount(id string, timestamp time.Time) error {
 		return nil
 	}
 	return model.ErrNotFound
+}
+
+func (m *MockMediaFileRepo) SetStar(starred bool, itemIDs ...string) error {
+	if m.Err {
+		return errors.New("error")
+	}
+	for _, id := range itemIDs {
+		if d, ok := m.Data[id]; ok {
+			d.Starred = starred
+		}
+	}
+	return nil
+}
+
+func (m *MockMediaFileRepo) SetRating(rating int, itemID string) error {
+	if m.Err {
+		return errors.New("error")
+	}
+	if d, ok := m.Data[itemID]; ok {
+		d.Rating = rating
+	}
+	return nil
 }
 
 func (m *MockMediaFileRepo) FindByAlbum(artistId string) (model.MediaFiles, error) {
@@ -268,8 +319,7 @@ func (m *MockMediaFileRepo) Search(q string, options ...model.QueryOptions) (mod
 		return nil, errors.New("unexpected error")
 	}
 	// Simple mock implementation - just return all media files for testing
-	allFiles, err := m.GetAll()
-	return allFiles, err
+	return m.GetAll()
 }
 
 // Cross-library move detection mock methods
@@ -319,6 +369,13 @@ func (m *MockMediaFileRepo) FindRecentFilesByProperties(missing model.MediaFile,
 		}
 	}
 	return result, nil
+}
+
+func (m *MockMediaFileRepo) MatchesCriteria(string, criteria.Criteria) (bool, error) {
+	if m.MatchesCriteriaErr != nil {
+		return false, m.MatchesCriteriaErr
+	}
+	return m.MatchesCriteriaValue, nil
 }
 
 var _ model.MediaFileRepository = (*MockMediaFileRepo)(nil)

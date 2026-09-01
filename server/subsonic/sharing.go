@@ -31,7 +31,7 @@ func (api *Router) GetShares(r *http.Request) (*responses.Subsonic, error) {
 func (api *Router) buildShare(r *http.Request, share model.Share) responses.Share {
 	resp := responses.Share{
 		ID:          share.ID,
-		Url:         public.ShareURL(r, share.ID),
+		Url:         public.ShareURL(r.Context(), share.ID),
 		Description: share.Description,
 		Username:    share.Username,
 		Created:     share.CreatedAt,
@@ -52,9 +52,9 @@ func (api *Router) buildShare(r *http.Request, share model.Share) responses.Shar
 
 func (api *Router) CreateShare(r *http.Request) (*responses.Subsonic, error) {
 	p := req.Params(r)
-	ids, err := p.Strings("id")
-	if err != nil {
-		return nil, err
+	ids := p.Strings("id")
+	if len(ids) == 0 {
+		return nil, newError(responses.ErrorMissingParameter, "missing parameter: 'id'")
 	}
 
 	description, _ := p.String("description")

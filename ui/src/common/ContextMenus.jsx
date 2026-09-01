@@ -7,7 +7,12 @@ import MenuItem from '@material-ui/core/MenuItem'
 import MoreVertIcon from '@material-ui/icons/MoreVert'
 import { MdQuestionMark } from 'react-icons/md'
 import { makeStyles } from '@material-ui/core/styles'
-import { useDataProvider, useNotify, useTranslate } from 'react-admin'
+import {
+  useDataProvider,
+  useNotify,
+  usePermissions,
+  useTranslate,
+} from 'react-admin'
 import clsx from 'clsx'
 import {
   playNext,
@@ -24,6 +29,7 @@ import {
 import { LoveButton } from './LoveButton'
 import config from '../config'
 import { formatBytes } from '../utils'
+import { artistDownloadSize } from './artist'
 
 const useStyles = makeStyles({
   noWrap: {
@@ -68,7 +74,11 @@ const ContextMenu = ({
   const dispatch = useDispatch()
   const translate = useTranslate()
   const notify = useNotify()
+  const { permissions } = usePermissions()
   const [anchorEl, setAnchorEl] = useState(null)
+
+  const isArtist = resource === 'artist'
+  const downloadSize = isArtist ? artistDownloadSize(record) : record?.size
 
   const options = {
     play: {
@@ -103,7 +113,7 @@ const ContextMenu = ({
     },
     ...(!hideShare && {
       share: {
-        enabled: config.enableSharing,
+        enabled: config.enableSharing && (!isArtist || downloadSize),
         needData: false,
         label: translate('ra.action.share'),
         action: (record) =>
@@ -111,9 +121,9 @@ const ContextMenu = ({
       },
     }),
     download: {
-      enabled: config.enableDownloads && record.size,
+      enabled: config.enableDownloads && downloadSize,
       needData: false,
-      label: `${translate('ra.action.download')} (${formatBytes(record.size)})`,
+      label: `${translate('ra.action.download')} (${formatBytes(downloadSize)})`,
       action: () => {
         dispatch(
           openDownloadMenu(
@@ -124,6 +134,16 @@ const ContextMenu = ({
           ),
         )
       },
+    },
+    refresh: {
+      enabled: permissions === 'admin',
+      needData: false,
+      label: translate('resources.album.actions.refresh'),
+      action: (record) =>
+        dataProvider
+          .refreshMetadata(resource, record.id)
+          .then(() => notify('message.metadataRefreshStarted'))
+          .catch(() => notify('ra.page.error', 'warning')),
     },
     ...(!hideInfo && {
       info: {

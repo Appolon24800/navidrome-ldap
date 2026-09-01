@@ -17,6 +17,7 @@ import (
 	"github.com/navidrome/navidrome/core/artwork"
 	"github.com/navidrome/navidrome/core/lyrics"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/model/request"
 	"github.com/navidrome/navidrome/tests"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -30,8 +31,14 @@ var _ = Describe("MediaRetrievalController", func() {
 	var w *httptest.ResponseRecorder
 
 	BeforeEach(func() {
+		albumRepo := &tests.MockAlbumRepo{}
+		albumRepo.SetData(model.Albums{{ID: "34"}}) // the id the specs request, made accessible
+		radioRepo := tests.CreateMockedRadioRepo()
+		Expect(radioRepo.Put(&model.Radio{ID: "rd1", Name: "Radio"})).To(Succeed())
 		ds = &tests.MockDataStore{
 			MockedMediaFile: mockRepo,
+			MockedAlbum:     albumRepo,
+			MockedRadio:     radioRepo,
 		}
 		artwork = &fakeArtwork{data: "image data"}
 		router = New(ds, artwork, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, lyrics.NewLyrics(ds, nil), nil, nil)
@@ -60,6 +67,22 @@ var _ = Describe("MediaRetrievalController", func() {
 			Expect(w.Body.String()).To(Equal(artwork.data))
 		})
 
+		// The service applies the library filter from the caller's context, so elevating here
+		// would bypass it.
+		It("passes the caller's context to the service rather than elevating", func() {
+			r := newGetRequest("id=al-34")
+			usr := model.User{ID: "u1", UserName: "u1"}
+			r = r.WithContext(request.WithUser(r.Context(), usr))
+
+			_, err := router.GetCoverArt(w, r)
+
+			Expect(err).ToNot(HaveOccurred())
+			got, ok := request.UserFrom(artwork.recvCtx)
+			Expect(ok).To(BeTrue(), "the service must see who is asking")
+			Expect(got.ID).To(Equal("u1"))
+			Expect(got.IsAdmin).To(BeFalse(), "the handler must not elevate")
+		})
+
 		It("should fail when the file is not found", func() {
 			artwork.err = model.ErrNotFound
 			r := newGetRequest("id=34", "size=128", "square=true")
@@ -78,7 +101,7 @@ var _ = Describe("MediaRetrievalController", func() {
 
 		When("client disconnects (context is cancelled)", func() {
 			It("should not call the service if cancelled before the call", func() {
-				ctx, cancel := context.WithCancel(context.Background())
+				ctx, cancel := context.WithCancel(GinkgoT().Context())
 				r := newGetRequest("id=34", "size=128", "square=true")
 				r = r.WithContext(ctx)
 				cancel()
@@ -93,7 +116,7 @@ var _ = Describe("MediaRetrievalController", func() {
 			})
 
 			It("should not return data if cancelled during the call", func() {
-				ctx, cancel := context.WithCancel(context.Background())
+				ctx, cancel := context.WithCancel(GinkgoT().Context())
 				defer cancel()
 				r := newGetRequest("id=34", "size=128", "square=true")
 				r = r.WithContext(ctx)
@@ -108,12 +131,59 @@ var _ = Describe("MediaRetrievalController", func() {
 				Expect(w.Body.String()).To(BeEmpty())
 			})
 		})
+
+		Describe("caching headers", func() {
+			const hash = "0123456789abcdef"
+
+			It("sets an ETag and no-cache for a bare id", func() {
+				artwork.hash = hash
+				r := newGetRequest("id=al-34")
+				_, err := router.GetCoverArt(w, r)
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(w.Header().Get("ETag")).To(Equal(`"` + hash + `"`))
+				Expect(w.Header().Get("Cache-Control")).To(Equal("public, no-cache"))
+				Expect(w.Body.String()).To(Equal(artwork.data))
+			})
+
+			It("marks the response immutable when the id asserts the current hash", func() {
+				artwork.hash = hash
+				r := newGetRequest("id=al-34_" + hash)
+				_, err := router.GetCoverArt(w, r)
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(w.Header().Get("Cache-Control")).To(Equal("public, max-age=31536000, immutable"))
+			})
+
+			It("returns 304 with no body when If-None-Match matches", func() {
+				artwork.hash = hash
+				r := newGetRequest("id=al-34")
+				r.Header.Set("If-None-Match", `"`+hash+`"`)
+				_, err := router.GetCoverArt(w, r)
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(w.Code).To(Equal(304))
+				Expect(w.Body.Len()).To(BeZero())
+			})
+
+			It("never caches a placeholder", func() {
+				artwork.placeholder = true
+				r := newGetRequest("id=al-missing")
+				_, err := router.GetCoverArt(w, r)
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(w.Code).To(Equal(200))
+				Expect(w.Header().Get("Cache-Control")).To(Equal("no-store"))
+				Expect(w.Header().Get("ETag")).To(BeEmpty())
+				Expect(w.Body.String()).To(Equal(artwork.data))
+			})
+		})
 	})
 
 	Describe("GetLyrics", func() {
 		It("should return data for given artist & title", func() {
 			r := newGetRequest("artist=Rick+Astley", "title=Never+Gonna+Give+You+Up")
-			lyricsList, _ := model.ParseLyrics(".lrc", "eng", []byte("[00:18.80]We're no strangers to love\n[00:22.80]You know the rules and so do I"))
+			lyricsList, _ := model.ParseLyrics(GinkgoT().Context(), ".lrc", "eng", []byte("[00:18.80]We're no strangers to love\n[00:22.80]You know the rules and so do I"))
 			lyrics, _ := lyricsList.Main()
 			lyricsJson, err := json.Marshal(model.LyricList{
 				lyrics,
@@ -188,25 +258,35 @@ var _ = Describe("MediaRetrievalController", func() {
 type fakeArtwork struct {
 	artwork.Artwork
 	data          string
+	hash          string
+	lastUpdated   time.Time
+	placeholder   bool
 	err           error
 	ctxCancelFunc func()
 	recvId        string
 	recvSize      int
 	recvSquare    bool
+	recvCtx       context.Context
 }
 
-func (c *fakeArtwork) GetOrPlaceholder(_ context.Context, id string, size int, square bool) (io.ReadCloser, time.Time, error) {
+func (c *fakeArtwork) GetOrPlaceholder(ctx context.Context, id string, size int, square bool) (*artwork.Image, error) {
+	c.recvCtx = ctx
 	if c.err != nil {
-		return nil, time.Time{}, c.err
+		return nil, c.err
 	}
 	c.recvId = id
 	c.recvSize = size
 	c.recvSquare = square
 	if c.ctxCancelFunc != nil {
 		c.ctxCancelFunc()
-		return nil, time.Time{}, context.Canceled
+		return nil, context.Canceled
 	}
-	return io.NopCloser(bytes.NewReader([]byte(c.data))), time.Time{}, nil
+	return &artwork.Image{
+		ReadCloser:  io.NopCloser(bytes.NewReader([]byte(c.data))),
+		Hash:        c.hash,
+		LastUpdated: c.lastUpdated,
+		Placeholder: c.placeholder,
+	}, nil
 }
 
 type mockedMediaFile struct {

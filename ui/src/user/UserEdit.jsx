@@ -101,9 +101,10 @@ const UserEdit = (props) => {
         })
         permissions === 'admin' ? redirect('/user') : refresh()
       } catch (error) {
-        if (error.body.errors) {
+        if (error?.body?.errors) {
           return error.body.errors
         }
+        notify('ra.page.error', 'warning')
       }
     },
     [mutate, notify, permissions, redirect, refresh],
@@ -202,6 +203,17 @@ const UserEdit = (props) => {
             )}
           </FormDataConsumer>
         )}
+
+        <TextInput
+          source="scrobbleFilter"
+          multiline
+          minRows={2}
+          fullWidth
+          spellCheck={false}
+          style={{ maxWidth: '40em' }}
+          inputProps={{ style: { resize: 'vertical' } }}
+          helperText={translate('resources.user.helperTexts.scrobbleFilter')}
+        />
 
         <DateField variant="body1" source="lastLoginAt" showTime />
         <DateField variant="body1" source="lastAccessAt" showTime />

@@ -29,11 +29,12 @@ var _ = Describe("Plugin API", func() {
 
 	BeforeEach(func() {
 		DeferCleanup(configtest.SetupConfig())
+		conf.Server.EnableSharing = false
 		conf.Server.Plugins.Enabled = true
 		ds = &tests.MockDataStore{}
 		mockManager = &tests.MockPluginManager{}
 		auth.Init(ds)
-		nativeRouter := New(ds, nil, nil, nil, tests.NewMockLibraryService(), tests.NewMockUserService(), nil, mockManager, nil)
+		nativeRouter := New(ds, nil, nil, nil, tests.NewMockLibraryService(), tests.NewMockUserService(), nil, mockManager, nil, nil)
 		router = server.JWTVerifier(nativeRouter)
 
 		// Create test users
