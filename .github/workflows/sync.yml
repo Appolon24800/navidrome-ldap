@@ -4,19 +4,49 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
+    outputs:
+      pushed: ${{ steps.merge.outputs.pushed }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Merge upstream
+      - name: Merge navidrome/navidrome master
+        id: merge
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add upstream https://github.com/joestump/navidrome-ldap.git
-          git fetch upstream
-          git merge upstream/main --no-edit
-          git push
+          git remote add navidrome https://github.com/navidrome/navidrome.git
+          git fetch navidrome master
+
+          if git merge-base --is-ancestor navidrome/master HEAD; then
+            echo "Already up to date with navidrome/navidrome master; nothing to do."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git merge navidrome/master --no-edit; then
+            git push
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort || true
+            echo "Upstream merge has conflicts — a manual merge is needed. Exiting green."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # GITHUB_TOKEN pushes do not trigger `on: push` workflows, so the image
+  # build is invoked directly after an auto-merge.
+  build:
+    needs: sync
+    if: needs.sync.outputs.pushed == 'true'
+    uses: ./.github/workflows/docker.yml
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit

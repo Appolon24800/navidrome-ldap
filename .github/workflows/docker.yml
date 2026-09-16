@@ -2,6 +2,7 @@ name: Build Docker
 on:
   push:
     branches: [master]
+  workflow_call:
 
 jobs:
   build:
