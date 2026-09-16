@@ -308,8 +308,8 @@ func (r *mediaFileRepository) GetCursor(options ...model.QueryOptions) (model.Me
 	return wrapMediaFileCursor(cursor), nil
 }
 
-// GetAllIDs returns the IDs of GetAll's row set, skipping its wide column projection.
-func (r *mediaFileRepository) GetAllIDs(options ...model.QueryOptions) ([]string, error) {
+// getAllIDs returns the IDs of GetAll's row set, skipping its wide column projection.
+func (r *mediaFileRepository) getAllIDs(options ...model.QueryOptions) ([]string, error) {
 	sq := r.applyLibraryFilter(r.newSelect(options...).Columns("media_file.id"))
 	if filtersNeedAnnotation(sq) {
 		sq = r.withAnnotation(sq, "media_file.id")
@@ -341,7 +341,7 @@ func (r *mediaFileRepository) GetAlbumIDsByFolder(lib model.Library, folderIDs .
 
 // GetCursorWithArtwork streams the same rows as GetCursor, hydrated, via an id pre-pass.
 func (r *mediaFileRepository) GetCursorWithArtwork(options ...model.QueryOptions) (model.MediaFileCursor, error) {
-	ids, err := r.GetAllIDs(options...)
+	ids, err := r.getAllIDs(options...)
 	if err != nil {
 		return nil, err
 	}
@@ -362,19 +362,14 @@ func (r *mediaFileRepository) FindByPaths(paths []string) (model.MediaFiles, err
 	var unqualified []string
 
 	for _, path := range paths {
-		parts := strings.SplitN(path, ":", 2)
-		if len(parts) == 2 {
-			// Library-qualified path: "libraryID:path"
-			libraryID, err := strconv.Atoi(parts[0])
-			if err != nil {
-				// Invalid format, skip
-				continue
+		// A numeric prefix is ambiguous: "1:foo.mp3" qualifies a library, but "1999: A Life/01.mp3"
+		// is a plain path. Search both ways rather than guessing.
+		if id, rest, ok := strings.Cut(path, ":"); ok {
+			if libraryID, err := strconv.Atoi(id); err == nil {
+				byLibrary[libraryID] = append(byLibrary[libraryID], rest)
 			}
-			byLibrary[libraryID] = append(byLibrary[libraryID], parts[1])
-		} else {
-			// Unqualified path: search across all libraries
-			unqualified = append(unqualified, path)
 		}
+		unqualified = append(unqualified, path)
 	}
 
 	query := Or{}
@@ -403,6 +398,29 @@ func (r *mediaFileRepository) FindByPaths(paths []string) (model.MediaFiles, err
 
 func (r *mediaFileRepository) Delete(id string) error {
 	return r.delete(Eq{"id": id})
+}
+
+func (r *mediaFileRepository) ReassignReferences(prevID, newID string) error {
+	if err := r.ReassignAnnotation(prevID, newID); err != nil {
+		return fmt.Errorf("reassigning annotations: %w", err)
+	}
+	if err := r.reassignBookmark(prevID, newID); err != nil {
+		return fmt.Errorf("reassigning bookmarks: %w", err)
+	}
+	upd := Update("playlist_tracks").Set("media_file_id", newID).Where(Eq{"media_file_id": prevID})
+	if _, err := r.executeSQL(upd); err != nil {
+		return fmt.Errorf("reassigning playlist tracks: %w", err)
+	}
+	upd = Update("scrobbles").Set("media_file_id", newID).Where(Eq{"media_file_id": prevID})
+	if _, err := r.executeSQL(upd); err != nil {
+		return fmt.Errorf("reassigning scrobbles: %w", err)
+	}
+	// OR IGNORE: scrobble_buffer is unique on (user_id, service, media_file_id, play_time)
+	buf := Expr("update or ignore scrobble_buffer set media_file_id = ? where media_file_id = ?", newID, prevID)
+	if _, err := r.executeSQL(buf); err != nil {
+		return fmt.Errorf("reassigning buffered scrobbles: %w", err)
+	}
+	return nil
 }
 
 func (r *mediaFileRepository) DeleteAllMissing() (int64, error) {
