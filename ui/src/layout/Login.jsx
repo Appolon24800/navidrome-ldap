@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect, useRef } from 'react'
 import PropTypes from 'prop-types'
 import { Field, Form } from 'react-final-form'
 import { useDispatch } from 'react-redux'
@@ -21,6 +21,7 @@ import Logo from '../icons/android-icon-192x192.png'
 import Notification from './Notification'
 import useCurrentTheme from '../themes/useCurrentTheme'
 import config from '../config'
+import { baseUrl } from '../utils'
 import { clearQueue } from '../actions'
 import { INSIGHTS_DOC_URL } from '../consts.js'
 
@@ -146,7 +147,7 @@ const FormLogin = ({ loading, handleSubmit, validate }) => {
               <div className={classes.form}>
                 <div className={classes.input}>
                   <Field
-                    autoFocus
+                    autoFocus={!config.oidcEnabled}
                     name="username"
                     component={renderInput}
                     label={translate('ra.auth.username')}
@@ -177,6 +178,24 @@ const FormLogin = ({ loading, handleSubmit, validate }) => {
                   {translate('ra.auth.sign_in')}
                 </Button>
               </CardActions>
+              {config.oidcEnabled && (
+                <CardActions className={classes.actions}>
+                  <Button
+                    variant="outlined"
+                    color="primary"
+                    href={baseUrl('/auth/oidc/login')}
+                    // Keep password-field blur validation from moving the link
+                    // between pointer-down and pointer-up.
+                    onMouseDown={(event) => event.preventDefault()}
+                    disabled={loading}
+                    fullWidth
+                  >
+                    {translate('ra.auth.oidc_sign_in', {
+                      provider: config.oidcDisplayName,
+                    })}
+                  </Button>
+                </CardActions>
+              )}
             </Card>
             <Notification />
           </div>
@@ -322,6 +341,7 @@ const Login = ({ location }) => {
   const notify = useNotify()
   const login = useLogin()
   const dispatch = useDispatch()
+  const handledOIDC = useRef(false)
 
   const handleSubmit = useCallback(
     (auth) => {
@@ -343,6 +363,19 @@ const Login = ({ location }) => {
     },
     [dispatch, login, notify, setLoading, location],
   )
+
+  useEffect(() => {
+    const result = new URLSearchParams(location.search).get('oidc')
+    if (!config.oidcEnabled || !result || handledOIDC.current) return
+    handledOIDC.current = true
+    // The URL contains only a status flag; the one-use handoff is HttpOnly.
+    window.history.replaceState(window.history.state, '', '#/login')
+    if (result === 'complete') {
+      handleSubmit({ oidc: true })
+    } else {
+      notify('ra.auth.oidc_error', 'warning')
+    }
+  }, [handleSubmit, location.search, notify])
 
   const validateLogin = useCallback(
     (values) => {

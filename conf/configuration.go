@@ -123,6 +123,7 @@ type configOptions struct {
 	Subsonic                        subsonicOptions     `json:",omitzero"`
 	Transcoding                     transcodingOptions  `json:",omitzero"`
 	LDAP                            ldapOptions         `json:",omitzero"`
+	OIDC                            oidcOptions         `json:",omitzero"`
 	LastFM                          lastfmOptions       `json:",omitzero"`
 	Deezer                          deezerOptions       `json:",omitzero"`
 	ListenBrainz                    listenBrainzOptions `json:",omitzero"`
@@ -193,6 +194,24 @@ type subsonicOptions struct {
 	EnableAverageRating   bool
 	LegacyClients         string
 	MinimalClients        string
+}
+
+type oidcOptions struct {
+	Enabled            bool
+	DisplayName        string
+	IssuerURL          string
+	ClientID           string
+	ClientSecret       string
+	RedirectURL        string
+	MaxSessionDuration time.Duration
+	// Subjects are values rather than map keys: configuration keys are case-insensitive,
+	// but OIDC subject identifiers are case-sensitive. Bind to immutable Navidrome IDs.
+	Accounts []OIDCAccount
+}
+
+type OIDCAccount struct {
+	Subject string
+	UserID  string
 }
 
 type ldapOptions struct {
@@ -491,6 +510,7 @@ func Load(noConfigDump bool) {
 		validateBackupSchedule,
 		validateLDAPLivenessSchedule,
 		validateLDAPAdminFilter,
+		validateOIDC,
 		validatePlaylistsPath,
 		validatePurgeMissingOption,
 		validateByteSize("MaxImageUploadSize", Server.MaxImageUploadSize),
@@ -1029,6 +1049,14 @@ func hasNDEnvVars() bool {
 }
 
 func setViperDefaults() {
+	viper.SetDefault("oidc.enabled", false)
+	viper.SetDefault("oidc.displayname", "PocketID")
+	viper.SetDefault("oidc.issuerurl", "")
+	viper.SetDefault("oidc.clientid", "")
+	viper.SetDefault("oidc.clientsecret", "")
+	viper.SetDefault("oidc.redirecturl", "")
+	viper.SetDefault("oidc.maxsessionduration", 12*time.Hour)
+	viper.SetDefault("oidc.accounts", []OIDCAccount{})
 	viper.SetDefault("musicfolder", filepath.Join(".", "music"))
 	viper.SetDefault("cachefolder", "")
 	viper.SetDefault("datafolder", ".")

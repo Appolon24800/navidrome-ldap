@@ -4,6 +4,8 @@
 const defaultConfig = {
   version: 'dev',
   firstTime: false,
+  oidcEnabled: false,
+  oidcDisplayName: 'PocketID',
   baseURL: '',
   variousArtistsId: '63sqASlAfjbGMuLP4JhnZU', // See consts.VariousArtistsID in consts.go
   // Login backgrounds from https://unsplash.com/collections/1065384/music-wallpapers

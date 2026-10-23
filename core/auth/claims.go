@@ -15,6 +15,8 @@ type Claims struct {
 	Audience  []string // which API may accept this token; empty means any
 	IssuedAt  time.Time
 	ExpiresAt time.Time
+	// Optional absolute session deadline, preserved across sliding refreshes.
+	SessionExpiresAt time.Time
 
 	// Custom claims
 	UserID  string // "uid"
@@ -53,6 +55,9 @@ func (c Claims) ToMap() map[string]any {
 	}
 	if !c.ExpiresAt.IsZero() {
 		m[jwt.ExpirationKey] = c.ExpiresAt.UTC().Unix()
+	}
+	if !c.SessionExpiresAt.IsZero() {
+		m["maxexp"] = c.SessionExpiresAt.UTC().Unix()
 	}
 	if c.UserID != "" {
 		m["uid"] = c.UserID
@@ -96,6 +101,9 @@ func ClaimsFromToken(token jwt.Token) Claims {
 	c.Subject, _ = token.Subject()
 	c.IssuedAt, _ = token.IssuedAt()
 	c.ExpiresAt, _ = token.Expiration()
+	if deadline := intClaim(token, "maxexp"); deadline != 0 {
+		c.SessionExpiresAt = time.Unix(int64(deadline), 0)
+	}
 	c.Audience, _ = token.Audience()
 
 	var uid string

@@ -91,6 +91,14 @@ func CreateToken(u *model.User) (string, error) {
 	return createToken(u, "", "")
 }
 
+// CreateTokenWithDeadline creates a regular Navidrome session that cannot be
+// refreshed past deadline. The APIs continue to verify Navidrome tokens only.
+func CreateTokenWithDeadline(u *model.User, deadline time.Time) (string, error) {
+	claims := userClaims(u, nil)
+	claims.SessionExpiresAt = deadline
+	return TouchClaims(claims)
+}
+
 // CreateTokenWithAppPassword is like CreateToken but embeds the app password
 // that authenticated the session (the apid/apnm claims). The Native API's
 // AppPasswordVerifier inspects apid on each request and rejects the token once
@@ -125,6 +133,14 @@ func TouchToken(token jwt.Token) (string, error) {
 
 func TouchClaims(c Claims) (string, error) {
 	c = c.WithExpiresAt(time.Now().UTC().Add(conf.Server.SessionTimeout))
+	if !c.SessionExpiresAt.IsZero() {
+		if !time.Now().Before(c.SessionExpiresAt) {
+			return "", errors.New("session expired")
+		}
+		if c.ExpiresAt.After(c.SessionExpiresAt) {
+			c.ExpiresAt = c.SessionExpiresAt
+		}
+	}
 	_, newToken, err := TokenAuth.Encode(c.ToMap())
 	return newToken, err
 }
