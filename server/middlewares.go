@@ -39,7 +39,14 @@ func requestLogger(next http.Handler) http.Handler {
 		next.ServeHTTP(ww, r)
 		status := ww.Status()
 
-		message := fmt.Sprintf("HTTP: %s %s://%s%s", r.Method, scheme, r.Host, r.RequestURI)
+		requestURI := r.RequestURI
+		oidcRequest := strings.HasPrefix(r.URL.Path, strings.TrimRight(conf.Server.BasePath, "/")+"/auth/oidc/")
+		if oidcRequest {
+			// Authorization codes, state and handoff cookies must not enter logs,
+			// even when trace logging is enabled or redaction is disabled.
+			requestURI = r.URL.EscapedPath()
+		}
+		message := fmt.Sprintf("HTTP: %s %s://%s%s", r.Method, scheme, r.Host, requestURI)
 		logArgs := []any{
 			r.Context(),
 			message,
@@ -48,8 +55,11 @@ func requestLogger(next http.Handler) http.Handler {
 			"httpStatus", ww.Status(),
 			"responseSize", ww.BytesWritten(),
 		}
-		if log.IsGreaterOrEqualTo(log.LevelTrace) {
-			headers, _ := json.Marshal(r.Header)
+		if log.IsGreaterOrEqualTo(log.LevelTrace) && !oidcRequest {
+			safeHeaders := r.Header.Clone()
+			// Cookies can carry session credentials and the OIDC handoff handle.
+			safeHeaders.Del("Cookie")
+			headers, _ := json.Marshal(safeHeaders)
 			logArgs = append(logArgs, "header", string(headers))
 		} else if log.IsGreaterOrEqualTo(log.LevelDebug) {
 			logArgs = append(logArgs, "userAgent", r.UserAgent())

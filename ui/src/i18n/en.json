@@ -449,6 +449,9 @@
   },
   "ra": {
     "auth": {
+      "oidc_sign_in": "Sign in with %{provider}",
+      "oidc_redirecting": "Signing in with %{provider}…",
+      "oidc_error": "Sign-in could not be completed. Try again, or ask your administrator to check your account link.",
       "welcome1": "Thanks for installing Navidrome!",
       "welcome2": "To start, create an admin user",
       "confirmPassword": "Confirm Password",

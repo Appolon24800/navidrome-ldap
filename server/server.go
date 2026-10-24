@@ -218,6 +218,9 @@ func (s *Server) mountAuthenticationRoutes() chi.Router {
 			r.Post("/login", login(s.ds))
 		}
 		r.Post("/createAdmin", createAdmin(s.ds))
+		if conf.Server.OIDC.Enabled {
+			newOIDCLogin(s.ds).mount(r)
+		}
 	})
 }
 
