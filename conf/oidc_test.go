@@ -10,7 +10,7 @@ func TestOIDCConfiguration(t *testing.T) {
 	Server.BaseURL = "https://music.example/music"
 	valid := oidcOptions{Enabled: true, DisplayName: "PocketID", ClientID: "navidrome",
 		IssuerURL: "https://id.example", RedirectURL: "https://music.example/music/auth/oidc/callback",
-		MaxSessionDuration: time.Hour, Accounts: []OIDCAccount{{Subject: "CaseSensitive", UserID: "existing-user"}}}
+		MaxSessionDuration: time.Hour}
 	for _, test := range []struct {
 		name   string
 		change func(*oidcOptions)
@@ -29,15 +29,9 @@ func TestOIDCConfiguration(t *testing.T) {
 		{"credentials in URL", func(o *oidcOptions) { o.IssuerURL = "https://user:password@id.example" }, false},
 		{"no client", func(o *oidcOptions) { o.ClientID = "" }, false},
 		{"no deadline", func(o *oidcOptions) { o.MaxSessionDuration = 0 }, false},
-		{"duplicate subject", func(o *oidcOptions) { o.Accounts = append(o.Accounts, o.Accounts[0]) }, false},
-		{"missing user", func(o *oidcOptions) { o.Accounts = []OIDCAccount{{Subject: "someone"}} }, false},
-		{"case sensitive subjects", func(o *oidcOptions) {
-			o.Accounts = []OIDCAccount{{Subject: "ABC", UserID: "a"}, {Subject: "abc", UserID: "b"}}
-		}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			Server.OIDC = valid
-			Server.OIDC.Accounts = append([]OIDCAccount(nil), valid.Accounts...)
 			test.change(&Server.OIDC)
 			if err := validateOIDC(); (err == nil) != test.valid {
 				t.Fatalf("validation error: %v (valid=%v)", err, test.valid)

@@ -1,30 +1,11 @@
 package conf
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
-	"reflect"
 	"strings"
 )
-
-// Only OIDC account slices accept JSON here. Other list settings retain their
-// normal comma-separated syntax, while subjects inside JSON remain exact values.
-func decodeOIDCAccounts(from, to reflect.Type, value any) (any, error) {
-	if from != reflect.TypeOf("") || to != reflect.TypeOf([]OIDCAccount{}) {
-		return value, nil
-	}
-	raw := strings.TrimSpace(value.(string))
-	if raw == "" {
-		return []OIDCAccount{}, nil
-	}
-	var accounts []OIDCAccount
-	if !strings.HasPrefix(raw, "[") || json.Unmarshal([]byte(raw), &accounts) != nil {
-		return nil, fmt.Errorf("OIDC.Accounts must be a JSON array of objects with Subject and UserID fields")
-	}
-	return accounts, nil
-}
 
 // OIDC uses administrator-configured URLs, never request Host or forwarded headers.
 // HTTP is permitted only on loopback addresses for local development.
@@ -58,13 +39,6 @@ func validateOIDC() error {
 	}
 	if o.MaxSessionDuration <= 0 {
 		return fmt.Errorf("OIDC.MaxSessionDuration must be positive")
-	}
-	seen := map[string]bool{}
-	for _, account := range o.Accounts {
-		if account.Subject == "" || account.UserID == "" || seen[account.Subject] {
-			return fmt.Errorf("OIDC.Accounts requires a unique, non-empty Subject and a non-empty UserID for each account")
-		}
-		seen[account.Subject] = true
 	}
 	return nil
 }

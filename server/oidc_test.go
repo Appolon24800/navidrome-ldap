@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/conf/configtest"
+	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/core/auth"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/tests"
@@ -34,6 +36,8 @@ type oidcTestProvider struct {
 	badNonce, badSignature, expired bool
 	exchanges                       int
 	lastIDToken                     string
+	username                        any
+	name, email                     string
 }
 
 func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
@@ -42,7 +46,7 @@ func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &oidcTestProvider{key: key, subject: "PocketID-Subject", audience: "navidrome"}
+	p := &oidcTestProvider{key: key, subject: "PocketID-Subject", audience: "navidrome", username: "alice", name: "PocketID Name", email: "alice@example.test"}
 	p.server = httptest.NewServer(http.HandlerFunc(p.serve))
 	t.Cleanup(p.server.Close)
 	return p
@@ -82,7 +86,9 @@ func (p *oidcTestProvider) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"test"}`))
 		claims, _ := json.Marshal(map[string]any{"iss": issuer, "aud": p.audience, "sub": p.subject,
-			"iat": time.Now().Unix(), "exp": expiry.Unix(), "nonce": nonce, "azp": p.azp})
+			"iat": time.Now().Unix(), "exp": expiry.Unix(), "nonce": nonce, "azp": p.azp,
+			"preferred_username": p.username, "name": p.name, "email": p.email,
+			"groups": []string{"admins"}, "isAdmin": true})
 		unsigned := header + "." + base64.RawURLEncoding.EncodeToString(claims)
 		digest := sha256.Sum256([]byte(unsigned))
 		sig, _ := rsa.SignPKCS1v15(rand.Reader, p.key, crypto.SHA256, digest[:])
@@ -106,7 +112,6 @@ func setupOIDC(t *testing.T) (*oidcLogin, *oidcTestProvider, *model.User) {
 	conf.Server.OIDC.ClientID = "navidrome"
 	conf.Server.OIDC.RedirectURL = "https://music.example/music/auth/oidc/callback"
 	conf.Server.OIDC.MaxSessionDuration = time.Hour
-	conf.Server.OIDC.Accounts = []conf.OIDCAccount{{Subject: p.subject, UserID: "existing-user"}}
 	ds := &tests.MockDataStore{}
 	auth.Init(ds)
 	user := &model.User{ID: "existing-user", UserName: "alice", Name: "Existing Name", IsAdmin: true, NewPassword: "local-password"}
@@ -125,7 +130,7 @@ func startOIDC(t *testing.T, o *oidcLogin, p *oidcTestProvider) (*http.Cookie, s
 	}
 	u, _ := url.Parse(w.Header().Get("Location"))
 	q := u.Query()
-	if q.Get("code_challenge_method") != "S256" || q.Get("nonce") == "" || q.Get("state") == "" || q.Get("scope") != "openid" {
+	if q.Get("code_challenge_method") != "S256" || q.Get("nonce") == "" || q.Get("state") == "" || q.Get("scope") != "openid profile email" {
 		t.Fatalf("invalid authorization request: %s", u)
 	}
 	p.nonce, p.challenge, p.redirect = q.Get("nonce"), q.Get("code_challenge"), q.Get("redirect_uri")
@@ -195,9 +200,9 @@ func TestOIDCLogin(t *testing.T) {
 }
 
 func TestOIDCRejectsInvalidLogin(t *testing.T) {
-	for _, scenario := range []string{"missing browser cookie", "wrong state", "wrong nonce", "wrong audience", "wrong issuer", "expired token", "bad signature", "unlinked subject", "subject case mismatch", "wrong authorized party", "expired transaction", "deleted user"} {
+	for _, scenario := range []string{"missing browser cookie", "wrong state", "wrong nonce", "wrong audience", "wrong issuer", "expired token", "bad signature", "missing username", "blank username", "malformed username", "missing subject", "wrong authorized party", "expired transaction", "database failure"} {
 		t.Run(scenario, func(t *testing.T) {
-			o, p, user := setupOIDC(t)
+			o, p, _ := setupOIDC(t)
 			cookie, state := startOIDC(t, o, p)
 			switch scenario {
 			case "missing browser cookie":
@@ -214,18 +219,22 @@ func TestOIDCRejectsInvalidLogin(t *testing.T) {
 				p.expired = true
 			case "bad signature":
 				p.badSignature = true
-			case "unlinked subject":
-				p.subject = "unknown"
-			case "subject case mismatch":
-				p.subject = strings.ToLower(p.subject)
+			case "missing username":
+				p.username = nil
+			case "blank username":
+				p.username = "  "
+			case "malformed username":
+				p.username = []string{"alice"}
+			case "missing subject":
+				p.subject = ""
 			case "wrong authorized party":
 				p.azp = "another-client"
 			case "expired transaction":
 				tx := o.pending[cookie.Value]
 				tx.expires = time.Now().Add(-time.Second)
 				o.pending[cookie.Value] = tx
-			case "deleted user":
-				user.ID = "different-id"
+			case "database failure":
+				o.ds.(*tests.MockDataStore).MockedUser.(*tests.MockedUserRepo).Error = errors.New("database unavailable")
 			}
 			w := callbackOIDC(o, cookie, state)
 			if w.Header().Get("Location") != "/music/app/#/login?oidc=failed" {
@@ -242,6 +251,72 @@ func TestOIDCHandoffRejectsCredentialChange(t *testing.T) {
 	user.TokenEpoch++
 	if got := sessionOIDC(o, w.Result().Cookies()[0], "https://music.example"); got.Code != http.StatusUnauthorized {
 		t.Fatal("session accepted after credentials were changed")
+	}
+}
+
+func TestOIDCAutomaticallyCreatesUsers(t *testing.T) {
+	o, p, _ := setupOIDC(t)
+	p.username = "new-listener"
+	cookie, state := startOIDC(t, o, p)
+	w := callbackOIDC(o, cookie, state)
+	if !strings.HasSuffix(w.Header().Get("Location"), "oidc=complete") {
+		t.Fatalf("automatic provisioning failed: %s", w.Header().Get("Location"))
+	}
+	user, err := o.ds.User(context.Background()).FindByUsername("new-listener")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.ID == "" || user.IsAdmin || user.AuthType != model.AuthTypeLocal || user.Name != p.name || user.Email != p.email {
+		t.Fatalf("unexpected provisioned user: id=%s, admin=%v, name=%s", user.ID, user.IsAdmin, user.Name)
+	}
+	if !strings.HasPrefix(user.Password, consts.PasswordAutogenPrefix) {
+		t.Fatal("new account did not receive an independent generated credential")
+	}
+	session := sessionOIDC(o, w.Result().Cookies()[0], "https://music.example")
+	var payload map[string]any
+	_ = json.Unmarshal(session.Body.Bytes(), &payload)
+	if session.Code != http.StatusOK || payload["username"] != "new-listener" || payload["isAdmin"] != false {
+		t.Fatalf("new user could not sign in: %d", session.Code)
+	}
+}
+
+func TestOIDCAutomaticallyMatchesExistingUsernames(t *testing.T) {
+	o, p, existing := setupOIDC(t)
+	existing.AuthType = model.AuthTypeLDAP
+	user, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "ALICE"})
+	if err != nil || user.ID != existing.ID || user.AuthType != model.AuthTypeLDAP || user.Password != "local-password" || !user.IsAdmin {
+		t.Fatalf("existing account was not preserved: %v", err)
+	}
+	count, _ := o.ds.User(context.Background()).CountAll()
+	if count != 1 {
+		t.Fatal("created a duplicate instead of matching the existing username")
+	}
+}
+
+func TestOIDCRemembersIdentityAfterUsernameChanges(t *testing.T) {
+	o, p, existing := setupOIDC(t)
+	if _, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	// The automatic association survives a new login manager/server restart.
+	o = newOIDCLogin(o.ds)
+	user, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "new-username"})
+	if err != nil || user.ID != existing.ID {
+		t.Fatalf("username change lost the existing user's data: %v", err)
+	}
+	if _, err := o.resolveUser(context.Background(), "different-subject", oidcUserClaims{PreferredUsername: "alice"}); err == nil {
+		t.Fatal("a different provider identity claimed an already-associated username")
+	}
+}
+
+func TestOIDCDeletedAccountsDoNotInheritReplacementPrivileges(t *testing.T) {
+	o, p, existing := setupOIDC(t)
+	if _, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	existing.ID = "replacement-user"
+	if _, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "alice"}); err == nil {
+		t.Fatal("the deleted identity inherited a replacement account")
 	}
 }
 
