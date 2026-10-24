@@ -40,12 +40,5 @@ func validateOIDC() error {
 	if o.MaxSessionDuration <= 0 {
 		return fmt.Errorf("OIDC.MaxSessionDuration must be positive")
 	}
-	seen := map[string]bool{}
-	for _, account := range o.Accounts {
-		if account.Subject == "" || account.UserID == "" || seen[account.Subject] {
-			return fmt.Errorf("OIDC.Accounts requires a unique, non-empty Subject and a non-empty UserID for each account")
-		}
-		seen[account.Subject] = true
-	}
 	return nil
 }

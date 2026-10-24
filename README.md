@@ -134,75 +134,74 @@ You can configure LDAP using the following environment variables:
 
 ## PocketID / OIDC web login
 
-OIDC is an optional additional sign-in method for the **Navidrome web login page only**.
-Subsonic clients continue using their existing passwords or app passwords. No Subsonic
-endpoint performs OIDC, accepts identity-provider tokens, or redirects to PocketID.
-Browser playback uses the same Navidrome session JWT as a password login.
+OIDC signs users in through PocketID on the **Navidrome web login page**.
+Accounts are matched automatically by username. A user's first successful login
+creates a normal Navidrome account if that username does not exist yet. There
+are no per-user IDs or mappings to configure.
 
-Create your first Navidrome administrator with the normal login page before enabling
-OIDC. In PocketID, create a confidential OIDC client, enable PKCE, and register the
-exact callback URL `https://music.example.com/auth/oidc/callback`. Include your
-Navidrome base path when applicable (for example `/music/auth/oidc/callback`). Choose
-which users or groups may access this client in PocketID.
+Configure everything through environment variables:
 
-Configure Navidrome in `navidrome.toml`:
-
-```toml
-[OIDC]
-Enabled = true
-DisplayName = "PocketID"
-IssuerURL = "https://id.example.com"
-ClientID = "your-pocketid-client-id"
-# Supply the client secret through ND_OIDC_CLIENTSECRET.
-RedirectURL = "https://music.example.com/auth/oidc/callback"
-MaxSessionDuration = "12h"
-# Optional: skip the Navidrome login form and redirect straight to PocketID.
-AutoRedirect = false
-
-[[OIDC.Accounts]]
-Subject = "the-pocketid-user-id"
-UserID = "the-existing-navidrome-user-id"
+```sh
+ND_BASEURL=https://music.example.com
+ND_OIDC_ENABLED=true
+ND_OIDC_AUTOREDIRECT=true
+ND_OIDC_DISPLAYNAME=PocketID
+ND_OIDC_ISSUERURL=https://id.example.com
+ND_OIDC_CLIENTID=your-pocketid-client-id
+# Set ND_OIDC_CLIENTSECRET through your deployment's secret/environment editor.
+ND_OIDC_REDIRECTURL=https://music.example.com/auth/oidc/callback
+ND_OIDC_MAXSESSIONDURATION=12h
 ```
 
-Add one `[[OIDC.Accounts]]` entry per linked account. `Subject` is the case-sensitive
-OIDC `sub` value (the user's ID in PocketID); `UserID` is Navidrome's immutable user ID,
-visible in the URL when an administrator edits that user. Restart Navidrome after
-changing the client or account links. The issuer is PocketID's base URL, rather than
-its `/.well-known/openid-configuration` URL. Public clients using PKCE also work without
-a client secret.
+In PocketID, create a confidential OIDC client, enable PKCE, and register the
+exact `ND_OIDC_REDIRECTURL` as its callback URL. Choose the users or groups allowed
+to access the client. The issuer is PocketID's base URL, rather than its
+`/.well-known/openid-configuration` URL. Public clients using PKCE also work
+without a client secret.
 
-Set `ND_OIDC_AUTOREDIRECT=true` (or `OIDC.AutoRedirect = true` in TOML) to skip the
-Navidrome web login form and automatically redirect to PocketID. This requires
-`OIDC.Enabled = true` and defaults to false. The initial administrator setup remains
-available on a fresh installation. Callback or session-exchange failures display an
-error with a retry button instead of repeatedly redirecting. To restore the login
-form, disable this setting and restart Navidrome. This controls the web login page;
-existing password/app-password API authentication continues to work for clients.
+Include your Navidrome URL base path in both `ND_BASEURL` and the callback. For
+example, `https://home.appolon.dev/navidrome` uses the callback
+`https://home.appolon.dev/navidrome/auth/oidc/callback`.
 
-Account linking is explicit: there is no matching by email or username, automatic
-account creation, profile overwrite, or assignment of admin privileges. Linked
-accounts retain their existing authentication type, credentials and library access.
-An unlinked PocketID user cannot sign in. Removing and recreating a Navidrome user
-does not inherit the old user's link, since the IDs differ. Keep a local administrator
-available for access during identity-provider outages.
+Navidrome requests `openid profile email` and reads PocketID's `preferred_username`
+claim. On first sign-in it matches an existing Navidrome username case-insensitively,
+preserving that account's playlists, permissions, admin role and existing credentials.
+Treat PocketID as the authority for these usernames and control who may use the client
+in PocketID. New users receive their PocketID name/email and Navidrome's normal default
+library access. They are regular users; provider groups or role claims do not grant
+Navidrome admin privileges automatically.
 
-Only the `openid` scope is requested. Authorization uses PKCE S256 with single-use,
-browser-bound state and nonce checks; issuer, audience, signature and expiry are
-verified on the server. Identity-provider tokens and the client secret stay on the
-server. A short-lived HttpOnly cookie completes the browser login without placing
-session tokens in redirect URLs. HTTPS is required except for loopback development.
+After this automatic match or creation, Navidrome remembers the issuer and subject
+internally. Later PocketID username changes keep using the same account, and another
+PocketID identity cannot claim that already-associated account. This association is
+created automatically and requires no configuration or database migration. The old
+`OIDC.Accounts` / `ND_OIDC_ACCOUNTS` setting is no longer used.
 
-`MaxSessionDuration` bounds the session even while the user is active; signing in again
-requires a new OIDC exchange. Logging out clears the Navidrome browser session, without
-logging the user out of PocketID. Removing an account link blocks **new logins**;
-existing sessions last until their expiry or normal Navidrome token revocation.
-App passwords remain independent of PocketID and must be revoked separately when
-offboarding a user. Configure LDAP liveness checks separately if you use them.
+`ND_OIDC_AUTOREDIRECT=true` skips the Navidrome login form and redirects straight to
+PocketID. It requires OIDC to be enabled and defaults to false. Callback or session
+failures display an error with a retry button rather than redirecting repeatedly.
+Disable the setting and restart Navidrome to restore the ordinary login form.
+Fresh installations retain Navidrome's initial administrator setup.
 
-Scalar settings also accept the normal `ND_OIDC_*` environment variables, such as
-`ND_OIDC_ENABLED`, `ND_OIDC_ISSUERURL`, `ND_OIDC_CLIENTID`, `ND_OIDC_CLIENTSECRET`,
-`ND_OIDC_REDIRECTURL`, `ND_OIDC_AUTOREDIRECT`, and `ND_OIDC_MAXSESSIONDURATION`. Keep
-account-link entries in the TOML file so subject IDs retain their exact case.
+Subsonic and other clients keep their existing authentication. No Subsonic endpoint
+performs OIDC, accepts identity-provider tokens, or redirects to PocketID. Browser
+playback uses a normal Navidrome session JWT. Automatically created accounts receive
+an independent generated credential using Navidrome's external-auth convention;
+users can generate app passwords from the Security page for their music clients.
+Existing local and LDAP accounts keep their current credentials and authentication type.
+
+Authorization uses PKCE S256, browser-bound single-use state and nonce checks, and
+server-side issuer, audience, signature and expiry verification. Identity-provider
+tokens and the client secret stay on the server. A short-lived HttpOnly cookie
+completes login without putting session tokens in redirect URLs. HTTPS is required
+except for loopback development.
+
+`ND_OIDC_MAXSESSIONDURATION` bounds sessions even while users are active; signing in
+again requires a fresh OIDC exchange. Logout clears the Navidrome browser session,
+without logging out of PocketID. App passwords remain independent of PocketID and
+must be revoked separately when offboarding users. LDAP liveness checks remain
+separate if enabled. All scalar settings also support their usual TOML equivalents,
+but a configuration file is optional.
 
 ## Translations
 

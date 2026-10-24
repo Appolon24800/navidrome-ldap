@@ -38,15 +38,14 @@ type oidcTransaction struct {
 // All provider credentials stay on the server. The browser holds only a random,
 // short-lived transaction handle, bound to a single authorization attempt.
 type oidcLogin struct {
-	ds       model.DataStore
-	client   *http.Client
-	oauth    oauth2.Config
-	issuer   string
-	origin   string
-	uiURL    string
-	accounts map[string]string
-	maxAge   time.Duration
-	secure   bool
+	ds     model.DataStore
+	client *http.Client
+	oauth  oauth2.Config
+	issuer string
+	origin string
+	uiURL  string
+	maxAge time.Duration
+	secure bool
 
 	providerMu sync.Mutex
 	provider   *oidc.Provider
@@ -57,17 +56,13 @@ type oidcLogin struct {
 func newOIDCLogin(ds model.DataStore) *oidcLogin {
 	o := conf.Server.OIDC
 	redirect, _ := url.Parse(o.RedirectURL) // Validated when loading configuration.
-	accounts := make(map[string]string, len(o.Accounts))
-	for _, a := range o.Accounts {
-		accounts[a.Subject] = a.UserID
-	}
 	return &oidcLogin{
 		ds: ds, client: &http.Client{Timeout: 10 * time.Second},
 		oauth: oauth2.Config{ClientID: o.ClientID, ClientSecret: o.ClientSecret,
-			RedirectURL: o.RedirectURL, Scopes: []string{oidc.ScopeOpenID}},
+			RedirectURL: o.RedirectURL, Scopes: []string{oidc.ScopeOpenID, oidc.ScopeProfile, oidc.ScopeEmail}},
 		issuer: o.IssuerURL, origin: redirect.Scheme + "://" + strings.ToLower(redirect.Host), secure: redirect.Scheme == "https",
-		uiURL:    path.Join(conf.Server.BasePath, consts.URLPathUI) + "/#/login",
-		accounts: accounts, maxAge: o.MaxSessionDuration,
+		uiURL:   path.Join(conf.Server.BasePath, consts.URLPathUI) + "/#/login",
+		maxAge:  o.MaxSessionDuration,
 		pending: make(map[string]oidcTransaction),
 	}
 }
@@ -220,23 +215,16 @@ func (o *oidcLogin) callback(w http.ResponseWriter, r *http.Request) {
 		o.fail(w, r)
 		return
 	}
-	var claims struct {
-		AuthorizedParty string `json:"azp"`
-	}
+	var claims oidcUserClaims
 	if err := idToken.Claims(&claims); err != nil ||
 		(len(idToken.Audience) > 1 && claims.AuthorizedParty == "") ||
 		(claims.AuthorizedParty != "" && claims.AuthorizedParty != cfg.ClientID) {
 		o.fail(w, r)
 		return
 	}
-	userID := o.accounts[idToken.Subject]
-	if userID == "" {
-		log.Warn(r, "OIDC identity has no configured account link")
-		o.fail(w, r)
-		return
-	}
-	user, err := o.ds.User(r.Context()).Get(userID)
+	user, err := o.resolveUser(r.Context(), idToken.Subject, claims)
 	if err != nil {
+		log.Warn(r, "Could not resolve OIDC user")
 		o.fail(w, r)
 		return
 	}

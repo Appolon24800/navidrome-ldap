@@ -205,14 +205,6 @@ type oidcOptions struct {
 	ClientSecret       string
 	RedirectURL        string
 	MaxSessionDuration time.Duration
-	// Subjects are values rather than map keys: configuration keys are case-insensitive,
-	// but OIDC subject identifiers are case-sensitive. Bind to immutable Navidrome IDs.
-	Accounts []OIDCAccount
-}
-
-type OIDCAccount struct {
-	Subject string
-	UserID  string
 }
 
 type ldapOptions struct {
@@ -1058,7 +1050,6 @@ func setViperDefaults() {
 	viper.SetDefault("oidc.clientsecret", "")
 	viper.SetDefault("oidc.redirecturl", "")
 	viper.SetDefault("oidc.maxsessionduration", 12*time.Hour)
-	viper.SetDefault("oidc.accounts", []OIDCAccount{})
 	viper.SetDefault("musicfolder", filepath.Join(".", "music"))
 	viper.SetDefault("cachefolder", "")
 	viper.SetDefault("datafolder", ".")
