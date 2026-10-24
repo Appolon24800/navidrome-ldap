@@ -18,6 +18,8 @@ func TestOIDCConfiguration(t *testing.T) {
 	}{
 		{"valid", func(o *oidcOptions) {}, true},
 		{"disabled", func(o *oidcOptions) { *o = oidcOptions{} }, true},
+		{"automatic redirect", func(o *oidcOptions) { o.AutoRedirect = true }, true},
+		{"redirect requires OIDC", func(o *oidcOptions) { o.Enabled = false; o.AutoRedirect = true }, false},
 		{"loopback development", func(o *oidcOptions) { o.IssuerURL = "http://127.0.0.1:5556" }, true},
 		{"insecure issuer", func(o *oidcOptions) { o.IssuerURL = "http://id.example" }, false},
 		{"insecure callback", func(o *oidcOptions) { o.RedirectURL = "http://music.example/music/auth/oidc/callback" }, false},

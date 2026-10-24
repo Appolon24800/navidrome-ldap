@@ -198,6 +198,7 @@ type subsonicOptions struct {
 
 type oidcOptions struct {
 	Enabled            bool
+	AutoRedirect       bool
 	DisplayName        string
 	IssuerURL          string
 	ClientID           string
@@ -1050,6 +1051,7 @@ func hasNDEnvVars() bool {
 
 func setViperDefaults() {
 	viper.SetDefault("oidc.enabled", false)
+	viper.SetDefault("oidc.autoredirect", false)
 	viper.SetDefault("oidc.displayname", "PocketID")
 	viper.SetDefault("oidc.issuerurl", "")
 	viper.SetDefault("oidc.clientid", "")

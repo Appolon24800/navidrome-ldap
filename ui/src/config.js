@@ -5,6 +5,7 @@ const defaultConfig = {
   version: 'dev',
   firstTime: false,
   oidcEnabled: false,
+  oidcAutoRedirect: false,
   oidcDisplayName: 'PocketID',
   baseURL: '',
   variousArtistsId: '63sqASlAfjbGMuLP4JhnZU', // See consts.VariousArtistsID in consts.go

@@ -156,6 +156,8 @@ ClientID = "your-pocketid-client-id"
 # Supply the client secret through ND_OIDC_CLIENTSECRET.
 RedirectURL = "https://music.example.com/auth/oidc/callback"
 MaxSessionDuration = "12h"
+# Optional: skip the Navidrome login form and redirect straight to PocketID.
+AutoRedirect = false
 
 [[OIDC.Accounts]]
 Subject = "the-pocketid-user-id"
@@ -168,6 +170,14 @@ visible in the URL when an administrator edits that user. Restart Navidrome afte
 changing the client or account links. The issuer is PocketID's base URL, rather than
 its `/.well-known/openid-configuration` URL. Public clients using PKCE also work without
 a client secret.
+
+Set `ND_OIDC_AUTOREDIRECT=true` (or `OIDC.AutoRedirect = true` in TOML) to skip the
+Navidrome web login form and automatically redirect to PocketID. This requires
+`OIDC.Enabled = true` and defaults to false. The initial administrator setup remains
+available on a fresh installation. Callback or session-exchange failures display an
+error with a retry button instead of repeatedly redirecting. To restore the login
+form, disable this setting and restart Navidrome. This controls the web login page;
+existing password/app-password API authentication continues to work for clients.
 
 Account linking is explicit: there is no matching by email or username, automatic
 account creation, profile overwrite, or assignment of admin privileges. Linked
@@ -191,8 +201,8 @@ offboarding a user. Configure LDAP liveness checks separately if you use them.
 
 Scalar settings also accept the normal `ND_OIDC_*` environment variables, such as
 `ND_OIDC_ENABLED`, `ND_OIDC_ISSUERURL`, `ND_OIDC_CLIENTID`, `ND_OIDC_CLIENTSECRET`,
-`ND_OIDC_REDIRECTURL`, and `ND_OIDC_MAXSESSIONDURATION`. Keep account-link entries in
-the TOML file so subject IDs retain their exact case.
+`ND_OIDC_REDIRECTURL`, `ND_OIDC_AUTOREDIRECT`, and `ND_OIDC_MAXSESSIONDURATION`. Keep
+account-link entries in the TOML file so subject IDs retain their exact case.
 
 ## Translations
 

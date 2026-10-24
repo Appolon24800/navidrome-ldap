@@ -81,6 +81,7 @@ func serveIndex(ds model.DataStore, fs fs.FS, shareInfo *model.Share) http.Handl
 			"pluginsEnabled":            conf.Server.Plugins.Enabled,
 			"extAuthLogoutURL":          conf.Server.ExtAuth.LogoutURL,
 			"oidcEnabled":               conf.Server.OIDC.Enabled,
+			"oidcAutoRedirect":          conf.Server.OIDC.AutoRedirect,
 			"oidcDisplayName":           conf.Server.OIDC.DisplayName,
 		}
 		if strings.HasPrefix(conf.Server.UILoginBackgroundURL, "/") {

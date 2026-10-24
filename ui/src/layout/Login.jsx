@@ -335,13 +335,56 @@ const FormSignUp = ({ loading, handleSubmit, validate }) => {
   )
 }
 
+const OIDCRedirectLogin = ({ failed }) => {
+  const classes = useStyles()
+  const translate = useTranslate()
+
+  return (
+    <div className={classes.main}>
+      <Card className={classes.card}>
+        <div className={classes.avatar}>
+          <img src={Logo} className={classes.icon} alt="Navidrome" />
+        </div>
+        <div className={classes.form}>
+          <div className={classes.message} role={failed ? 'alert' : 'status'}>
+            {failed
+              ? translate('ra.auth.oidc_error')
+              : translate('ra.auth.oidc_redirecting', {
+                  provider: config.oidcDisplayName,
+                })}
+          </div>
+          {!failed && <CircularProgress size={25} thickness={2} />}
+        </div>
+        {failed && (
+          <CardActions className={classes.actions}>
+            <Button
+              variant="contained"
+              color="primary"
+              href={baseUrl('/auth/oidc/login')}
+              fullWidth
+            >
+              {translate('ra.auth.oidc_sign_in', {
+                provider: config.oidcDisplayName,
+              })}
+            </Button>
+          </CardActions>
+        )}
+      </Card>
+      <Notification />
+    </div>
+  )
+}
+
 const Login = ({ location }) => {
   const [loading, setLoading] = useState(false)
+  const [oidcFailed, setOIDCFailed] = useState(false)
   const translate = useTranslate()
   const notify = useNotify()
   const login = useLogin()
   const dispatch = useDispatch()
   const handledOIDC = useRef(false)
+  const autoRedirect =
+    config.oidcEnabled && config.oidcAutoRedirect && !config.firstTime
 
   const handleSubmit = useCallback(
     (auth) => {
@@ -350,6 +393,7 @@ const Login = ({ location }) => {
       login(auth, location.state ? location.state.nextPathname : '/').catch(
         (error) => {
           setLoading(false)
+          if (auth.oidc) setOIDCFailed(true)
           notify(
             typeof error === 'string'
               ? error
@@ -366,16 +410,24 @@ const Login = ({ location }) => {
 
   useEffect(() => {
     const result = new URLSearchParams(location.search).get('oidc')
-    if (!config.oidcEnabled || !result || handledOIDC.current) return
+    if (!config.oidcEnabled || config.firstTime || handledOIDC.current) return
+    if (!result) {
+      if (autoRedirect) {
+        handledOIDC.current = true
+        window.location.replace(baseUrl('/auth/oidc/login'))
+      }
+      return
+    }
     handledOIDC.current = true
     // The URL contains only a status flag; the one-use handoff is HttpOnly.
     window.history.replaceState(window.history.state, '', '#/login')
     if (result === 'complete') {
       handleSubmit({ oidc: true })
     } else {
+      setOIDCFailed(true)
       notify('ra.auth.oidc_error', 'warning')
     }
-  }, [handleSubmit, location.search, notify])
+  }, [autoRedirect, handleSubmit, location.search, notify])
 
   const validateLogin = useCallback(
     (values) => {
@@ -417,6 +469,9 @@ const Login = ({ location }) => {
         loading={loading}
       />
     )
+  }
+  if (autoRedirect) {
+    return <OIDCRedirectLogin failed={oidcFailed} />
   }
   return (
     <FormLogin

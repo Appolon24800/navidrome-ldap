@@ -12,6 +12,9 @@ import (
 func validateOIDC() error {
 	o := Server.OIDC
 	if !o.Enabled {
+		if o.AutoRedirect {
+			return fmt.Errorf("OIDC.AutoRedirect requires OIDC.Enabled=true")
+		}
 		return nil
 	}
 	if strings.TrimSpace(o.ClientID) == "" || strings.TrimSpace(o.DisplayName) == "" {
