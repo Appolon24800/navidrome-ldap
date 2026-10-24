@@ -64,6 +64,45 @@ var _ = Describe("Configuration", func() {
 		})
 	})
 
+	Describe("OIDC environment configuration", func() {
+		BeforeEach(func() {
+			t := GinkgoT()
+			t.Setenv("ND_CONFIGFILE", "")
+			t.Setenv("ND_OIDC_ENABLED", "true")
+			t.Setenv("ND_OIDC_AUTOREDIRECT", "true")
+			t.Setenv("ND_OIDC_ISSUERURL", "https://id.example.com")
+			t.Setenv("ND_OIDC_CLIENTID", "navidrome-client")
+			t.Setenv("ND_OIDC_CLIENTSECRET", "test-client-secret")
+			t.Setenv("ND_OIDC_REDIRECTURL", "https://music.example.com/auth/oidc/callback")
+			conf.InitConfig("", true)
+		})
+
+		It("loads a complete setup without a configuration file and preserves exact subject values", func() {
+			GinkgoT().Setenv("ND_OIDC_ACCOUNTS", `[{"subject":"PocketID-Subject,ABC","userID":"Navidrome-User-A"},{"subject":"pocketid-subject,abc","userID":"Navidrome-User-B"}]`)
+			conf.Load(true)
+			Expect(conf.Server.ConfigFile).To(BeEmpty())
+			Expect(conf.Server.OIDC.Enabled).To(BeTrue())
+			Expect(conf.Server.OIDC.AutoRedirect).To(BeTrue())
+			Expect(conf.Server.OIDC.ClientID).To(Equal("navidrome-client"))
+			Expect(conf.Server.OIDC.ClientSecret).To(Equal("test-client-secret"))
+			Expect(conf.Server.OIDC.Accounts).To(Equal([]conf.OIDCAccount{
+				{Subject: "PocketID-Subject,ABC", UserID: "Navidrome-User-A"},
+				{Subject: "pocketid-subject,abc", UserID: "Navidrome-User-B"},
+			}))
+		})
+
+		DescribeTable("rejects invalid account mappings", func(accounts string) {
+			GinkgoT().Setenv("ND_OIDC_ACCOUNTS", accounts)
+			Expect(func() { conf.Load(true) }).To(PanicWith(ContainSubstring("OIDC.Accounts")))
+		},
+			Entry("malformed JSON", `[{"subject":`),
+			Entry("object instead of array", `{"subject":"someone","userID":"user"}`),
+			Entry("null instead of array", `null`),
+			Entry("missing user ID", `[{"subject":"someone"}]`),
+			Entry("duplicate subject", `[{"subject":"same","userID":"a"},{"subject":"same","userID":"b"}]`),
+		)
+	})
+
 	Describe("scheduled DB analysis", func() {
 		It("is enabled by default", func() {
 			conf.Load(true)

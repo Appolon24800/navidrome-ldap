@@ -433,6 +433,7 @@ func Load(noConfigDump bool) {
 		mapstructure.ComposeDecodeHookFunc(
 			mapstructure.TextUnmarshallerHookFunc(),
 			mapstructure.StringToTimeDurationHookFunc(),
+			decodeOIDCAccounts,
 			mapstructure.StringToSliceHookFunc(","),
 		),
 	))

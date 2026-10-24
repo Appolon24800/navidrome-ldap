@@ -171,6 +171,29 @@ changing the client or account links. The issuer is PocketID's base URL, rather 
 its `/.well-known/openid-configuration` URL. Public clients using PKCE also work without
 a client secret.
 
+For an environment-only deployment, supply the account links as a JSON array in
+`ND_OIDC_ACCOUNTS` instead of creating a configuration file:
+
+```sh
+ND_OIDC_ENABLED=true
+ND_OIDC_AUTOREDIRECT=true
+ND_OIDC_DISPLAYNAME=PocketID
+ND_OIDC_ISSUERURL=https://id.example.com
+ND_OIDC_CLIENTID=your-pocketid-client-id
+# Set ND_OIDC_CLIENTSECRET through your deployment's secret/environment editor.
+ND_OIDC_REDIRECTURL=https://music.example.com/auth/oidc/callback
+ND_OIDC_MAXSESSIONDURATION=12h
+ND_OIDC_ACCOUNTS='[{"subject":"the-pocketid-user-id","userID":"the-existing-navidrome-user-id"}]'
+```
+
+The single quotes above are shell quoting. In a deployment UI's environment-value
+field, enter the JSON array itself, without wrapping it in single quotes. Add more
+objects to link additional accounts. Subject values preserve their exact case and
+punctuation. Malformed JSON, missing IDs and duplicate subjects fail validation at
+startup. When supplied, `ND_OIDC_ACCOUNTS` replaces account links from a config file.
+If Navidrome uses a URL base path, set `ND_BASEURL` and include that path in the
+registered callback and `ND_OIDC_REDIRECTURL`.
+
 Set `ND_OIDC_AUTOREDIRECT=true` (or `OIDC.AutoRedirect = true` in TOML) to skip the
 Navidrome web login form and automatically redirect to PocketID. This requires
 `OIDC.Enabled = true` and defaults to false. The initial administrator setup remains
@@ -201,8 +224,9 @@ offboarding a user. Configure LDAP liveness checks separately if you use them.
 
 Scalar settings also accept the normal `ND_OIDC_*` environment variables, such as
 `ND_OIDC_ENABLED`, `ND_OIDC_ISSUERURL`, `ND_OIDC_CLIENTID`, `ND_OIDC_CLIENTSECRET`,
-`ND_OIDC_REDIRECTURL`, `ND_OIDC_AUTOREDIRECT`, and `ND_OIDC_MAXSESSIONDURATION`. Keep
-account-link entries in the TOML file so subject IDs retain their exact case.
+`ND_OIDC_REDIRECTURL`, `ND_OIDC_AUTOREDIRECT`, and `ND_OIDC_MAXSESSIONDURATION`.
+Account links support either TOML `[[OIDC.Accounts]]` entries or the JSON-valued
+`ND_OIDC_ACCOUNTS` environment variable.
 
 ## Translations
 
