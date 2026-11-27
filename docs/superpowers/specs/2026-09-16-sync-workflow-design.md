@@ -44,3 +44,41 @@ direct pushes to master still build via `on: push`.
 Commit the workflow changes, merge the 53 pending upstream commits (manual
 conflict resolution if needed), push once — starting the workflow from a
 fresh, green baseline.
+
+## Revision 2026-11-27
+
+"Fully silent on unmergeable days" hid the problem it was meant to avoid.
+Upstream commits `fed35e08` and `b76ae142` (2026-09-19) added Jellyfin options
+next to the fork's LDAP options in `conf/configuration.go` and a route next to
+`api.addAppPasswordRoute` in `server/nativeapi/native_api.go`. Every run from
+2026-09-20 conflicted, exited 0, and went unnoticed. The last automatic merge
+was run 35332952302 on 2026-09-18. On 2026-11-27 the fork was 173 commits
+behind upstream, with 22 conflicted paths.
+
+Decisions:
+
+- **A blocked sync is visible.** A conflicting merge, or a clean merge that
+  fails the build, the tests or the end-to-end check, opens or updates one
+  issue titled "Upstream sync needs attention" and fails the run. The issue
+  lists the conflicted files or the last 60 log lines, with the commands to
+  resolve them.
+- **A clean merge is tested before it is pushed.** `git merge --no-commit`
+  leaves the merge uncommitted, `make build test test-js` and
+  `contrib/ldap-oidc-e2e/run.sh` run on the merged tree, and only a passing
+  tree is committed and pushed. The end-to-end check drives LDAP login, app
+  passwords, the liveness sweep and the OIDC login on the built binary, against
+  a private OpenLDAP directory and a fake OIDC provider.
+- **Tests are part of the gate because a merge can be conflict-free and still
+  break the fork.** Upstream changed the context key `parseUserIDMiddleware`
+  stores the user id under. The fork's app password handlers read the old key,
+  so every app password request failed with 403 or a panic. Only a test against
+  the real router showed it.
+- **The issue closes itself** on the next run that finds the branch up to
+  date, which also covers a manual merge pushed to master.
+- **A manual run can check a branch without merging.** `workflow_dispatch`
+  with `verify_only` runs the build, the tests and the end-to-end check on the
+  selected branch.
+- **Fork options leave `configuration.go`.** The LDAP and OIDC option structs,
+  validators and viper defaults now live in `conf/ldap.go` and `conf/oidc.go`.
+  The fork's footprint in `conf/configuration.go` is seven lines, so upstream
+  edits to that file merge on their own.

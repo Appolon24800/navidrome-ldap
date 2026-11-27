@@ -3,42 +3,192 @@ on:
   schedule:
     - cron: '0 6 * * *'
   workflow_dispatch:
+    inputs:
+      verify_only:
+        description: Build, test and run the LDAP/OIDC end-to-end check on the selected branch, without merging
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  issues: write
+
+# A second run must not merge or push while the first one is still testing.
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
-      pushed: ${{ steps.merge.outputs.pushed }}
+      pushed: ${{ steps.push.outputs.pushed }}
+    env:
+      # Identifies the single issue that reports a sync needing manual work.
+      SYNC_ISSUE_MARKER: '<!-- navidrome-ldap:sync-upstream -->'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
       - name: Merge navidrome/navidrome master
         id: merge
+        env:
+          VERIFY_ONLY: ${{ inputs.verify_only }}
         run: |
-          set -e
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add navidrome https://github.com/navidrome/navidrome.git
+          git remote get-url navidrome >/dev/null 2>&1 || git remote add navidrome https://github.com/navidrome/navidrome.git
           git fetch navidrome master
+          echo "upstream=$(git rev-parse navidrome/master)" >> "$GITHUB_OUTPUT"
 
-          if git merge-base --is-ancestor navidrome/master HEAD; then
-            echo "Already up to date with navidrome/navidrome master; nothing to do."
-            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          if [ "$VERIFY_ONLY" = "true" ]; then
+            echo "status=verify-only" >> "$GITHUB_OUTPUT"
+            echo "verify=true" >> "$GITHUB_OUTPUT"
+            echo "Checking the current branch only, nothing is merged."
             exit 0
           fi
 
-          if git merge navidrome/master --no-edit; then
-            git push
-            echo "pushed=true" >> "$GITHUB_OUTPUT"
-          else
-            git merge --abort || true
-            echo "Upstream merge has conflicts — a manual merge is needed. Exiting green."
-            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor navidrome/master HEAD; then
+            echo "status=up-to-date" >> "$GITHUB_OUTPUT"
+            echo "Already up to date with navidrome/navidrome master."
+            exit 0
           fi
+
+          # --no-commit keeps a clean merge uncommitted, so nothing is committed before the tests pass.
+          if ! git merge --no-ff --no-commit navidrome/master > "$RUNNER_TEMP/merge.log" 2>&1; then
+            git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
+            git merge --abort
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            {
+              echo "Upstream changed the same lines as the fork in these files:"
+              echo
+              sed 's/^/- `/' "$RUNNER_TEMP/conflicts.txt" | sed 's/$/`/'
+            } > "$RUNNER_TEMP/details.md"
+            cat "$RUNNER_TEMP/details.md"
+            exit 0
+          fi
+
+          echo "status=merged" >> "$GITHUB_OUTPUT"
+          echo "verify=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install OpenLDAP for the end-to-end check
+        if: steps.merge.outputs.verify == 'true'
+        run: sudo DEBIAN_FRONTEND=noninteractive apt-get install -y slapd ldap-utils
+
+      - name: Build and test the merge
+        id: verify
+        if: steps.merge.outputs.verify == 'true'
+        run: |
+          set -o pipefail
+          {
+            (cd ui && npm ci)
+            make build test test-js
+            ./contrib/ldap-oidc-e2e/run.sh ./navidrome
+          } 2>&1 | tee "$RUNNER_TEMP/verify.log"
+
+      - name: Keep the tail of a failed build or test log
+        if: failure() && steps.merge.outputs.verify == 'true'
+        run: |
+          {
+            echo 'Upstream merged without conflicts, but the build, the tests or the LDAP/OIDC end-to-end check failed, so nothing was pushed.'
+            echo
+            echo 'Last 60 lines of the log:'
+            echo
+            echo '```'
+            tail -n 60 "$RUNNER_TEMP/verify.log" | sed -E 's/\x1b\[[0-9;]*m//g'
+            echo '```'
+          } > "$RUNNER_TEMP/details.md"
+
+      - name: Push the merge
+        id: push
+        if: steps.merge.outputs.status == 'merged' && steps.verify.outcome == 'success'
+        run: |
+          set -euo pipefail
+          git commit --no-edit
+          git push
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the issue for a blocked sync
+        if: always() && (steps.merge.outputs.status == 'conflict' || steps.verify.outcome == 'failure') && steps.merge.outputs.status != 'verify-only'
+        uses: actions/github-script@v9
+        env:
+          SYNC_STATUS: ${{ steps.merge.outputs.status == 'conflict' && 'conflict' || 'tests failed' }}
+          SYNC_UPSTREAM: ${{ steps.merge.outputs.upstream }}
+        with:
+          script: |
+            const fs = require('fs')
+            const marker = process.env.SYNC_ISSUE_MARKER
+            const { owner, repo } = context.repo
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            const upstream = process.env.SYNC_UPSTREAM
+            const details = fs.readFileSync(`${process.env.RUNNER_TEMP}/details.md`, 'utf8')
+            const title = 'Upstream sync needs attention'
+            const body = [
+              marker,
+              `The merge of \`navidrome/navidrome\` master into \`${context.ref.replace('refs/heads/', '')}\` did not complete on its own.`,
+              '',
+              `- Status: ${process.env.SYNC_STATUS}`,
+              `- Upstream commit: [\`${upstream.slice(0, 8)}\`](https://github.com/navidrome/navidrome/commit/${upstream})`,
+              `- Workflow run: ${runUrl}`,
+              '',
+              details.trim(),
+              '',
+              '## To resolve',
+              '',
+              'In a clone of this repository:',
+              '',
+              '```sh',
+              'git fetch https://github.com/navidrome/navidrome.git master',
+              'git merge FETCH_HEAD',
+              '# Fix the conflicts or the failing checks, keeping the LDAP and OIDC behavior of the fork',
+              'make build test test-js',
+              'contrib/ldap-oidc-e2e/run.sh ./navidrome',
+              'git push',
+              '```',
+              '',
+              'The next run that finds the branch up to date closes this issue.',
+            ].join('\n')
+            const { data: open } = await github.rest.issues.listForRepo({ owner, repo, state: 'open', per_page: 100 })
+            const existing = open.find((issue) => issue.body && issue.body.includes(marker))
+            if (existing) {
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, title, body })
+            } else {
+              await github.rest.issues.create({ owner, repo, title, body })
+            }
+
+      # A manual merge pushed to master counts too: the next run then finds nothing to merge.
+      - name: Close the issue once master contains upstream
+        if: always() && (steps.push.outputs.pushed == 'true' || steps.merge.outputs.status == 'up-to-date')
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const marker = process.env.SYNC_ISSUE_MARKER
+            const { owner, repo } = context.repo
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            const upstream = process.env.SYNC_UPSTREAM
+            const { data: open } = await github.rest.issues.listForRepo({ owner, repo, state: 'open', per_page: 100 })
+            for (const issue of open.filter((issue) => issue.body && issue.body.includes(marker))) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                body: `Closed: ${context.ref.replace('refs/heads/', '')} contains \`navidrome/navidrome\` ${upstream.slice(0, 8)}. ${runUrl}` })
+              await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed' })
+            }
+
+      - name: Fail the run when the sync did not happen
+        if: always() && (steps.merge.outputs.status == 'conflict' || steps.verify.outcome == 'failure') && steps.merge.outputs.status != 'verify-only'
+        run: |
+          echo "::error::The upstream merge needs manual work. See the issue this run opened or updated."
+          exit 1
 
   # GITHUB_TOKEN pushes do not trigger `on: push` workflows, so the image
   # build is invoked directly after an auto-merge.
