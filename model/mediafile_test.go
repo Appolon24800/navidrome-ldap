@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/navidrome/navidrome/conf"
-	"github.com/navidrome/navidrome/conf/configtest"
+	"github.com/navidrome/navidrome/consts"
 	. "github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/tests"
 	. "github.com/onsi/ginkgo/v2"
@@ -70,12 +70,13 @@ var _ = Describe("MediaFiles", func() {
 					Expect(album.Date).To(BeEmpty())
 					Expect(album.UpdatedAt).To(BeZero())
 					Expect(album.CreatedAt).To(BeZero())
+					Expect(album.BirthTime).To(BeZero())
 				})
 			})
 			When("we have only one song", func() {
 				BeforeEach(func() {
 					mfs = MediaFiles{
-						{Duration: 100.2, Size: 1024, Year: 1985, Date: "1985-01-02", UpdatedAt: t("2022-12-19 09:30"), BirthTime: t("2022-12-19 08:30")},
+						{Duration: 100.2, Size: 1024, Year: 1985, Date: "1985-01-02", UpdatedAt: t("2022-12-19 09:30"), BirthTime: t("2022-12-19 08:30"), CreatedAt: t("2023-01-10 10:00")},
 					}
 				})
 				It("calculates the aggregates correctly", func() {
@@ -86,16 +87,17 @@ var _ = Describe("MediaFiles", func() {
 					Expect(album.MaxYear).To(Equal(1985))
 					Expect(album.Date).To(Equal("1985-01-02"))
 					Expect(album.UpdatedAt).To(Equal(t("2022-12-19 09:30")))
-					Expect(album.CreatedAt).To(Equal(t("2022-12-19 08:30")))
+					Expect(album.CreatedAt).To(Equal(t("2023-01-10 10:00")))
+					Expect(album.BirthTime).To(Equal(t("2022-12-19 08:30")))
 				})
 			})
 
 			When("we have multiple songs with different dates", func() {
 				BeforeEach(func() {
 					mfs = MediaFiles{
-						{Duration: 100.2, Size: 1024, Year: 1985, Date: "1985-01-02", UpdatedAt: t("2022-12-19 09:30"), BirthTime: t("2022-12-19 08:30")},
-						{Duration: 200.2, Size: 2048, Year: 0, Date: "", UpdatedAt: t("2022-12-19 09:45"), BirthTime: t("2022-12-19 08:30")},
-						{Duration: 150.6, Size: 1000, Year: 1986, Date: "1986-01-02", UpdatedAt: t("2022-12-19 09:45"), BirthTime: t("2022-12-19 07:30")},
+						{Duration: 100.2, Size: 1024, Year: 1985, Date: "1985-01-02", UpdatedAt: t("2022-12-19 09:30"), BirthTime: t("2022-12-19 08:30"), CreatedAt: t("2023-01-10 09:00")},
+						{Duration: 200.2, Size: 2048, Year: 0, Date: "", UpdatedAt: t("2022-12-19 09:45"), BirthTime: t("2022-12-19 08:30"), CreatedAt: t("2023-01-10 08:00")},
+						{Duration: 150.6, Size: 1000, Year: 1986, Date: "1986-01-02", UpdatedAt: t("2022-12-19 09:45"), BirthTime: t("2022-12-19 07:30"), CreatedAt: t("2023-01-10 10:00")},
 					}
 				})
 				It("calculates the aggregates correctly", func() {
@@ -106,7 +108,8 @@ var _ = Describe("MediaFiles", func() {
 					Expect(album.MaxYear).To(Equal(1986))
 					Expect(album.Date).To(BeEmpty())
 					Expect(album.UpdatedAt).To(Equal(t("2022-12-19 09:45")))
-					Expect(album.CreatedAt).To(Equal(t("2022-12-19 07:30")))
+					Expect(album.CreatedAt).To(Equal(t("2023-01-10 08:00")))
+					Expect(album.BirthTime).To(Equal(t("2022-12-19 07:30")))
 				})
 				Context("MinYear", func() {
 					It("returns 0 when all values are 0", func() {
@@ -120,18 +123,22 @@ var _ = Describe("MediaFiles", func() {
 						Expect(a.MinYear).To(Equal(1999))
 					})
 				})
-				Context("CreatedAt aggregation", func() {
-					It("ignores zero BirthTime values when computing the oldest", func() {
+				Context("CreatedAt and BirthTime aggregation", func() {
+					It("ignores zero values when computing the oldest", func() {
 						mfs = MediaFiles{
-							{BirthTime: t("2022-12-19 08:30")},
-							{BirthTime: time.Time{}},
-							{BirthTime: t("2022-12-18 10:00")},
+							{CreatedAt: t("2022-12-19 08:30"), BirthTime: t("2022-12-19 08:30")},
+							{},
+							{CreatedAt: t("2022-12-18 10:00"), BirthTime: t("2022-12-18 10:00")},
 						}
-						Expect(mfs.ToAlbum().CreatedAt).To(Equal(t("2022-12-18 10:00")))
+						album := mfs.ToAlbum()
+						Expect(album.CreatedAt).To(Equal(t("2022-12-18 10:00")))
+						Expect(album.BirthTime).To(Equal(t("2022-12-18 10:00")))
 					})
-					It("returns zero when all BirthTime values are zero", func() {
-						mfs = MediaFiles{{BirthTime: time.Time{}}, {BirthTime: time.Time{}}}
-						Expect(mfs.ToAlbum().CreatedAt).To(BeZero())
+					It("returns zero when all values are zero", func() {
+						mfs = MediaFiles{{}, {}}
+						album := mfs.ToAlbum()
+						Expect(album.CreatedAt).To(BeZero())
+						Expect(album.BirthTime).To(BeZero())
 					})
 				})
 			})
@@ -520,12 +527,11 @@ var _ = Describe("MediaFiles", func() {
 
 var _ = Describe("MediaFile", func() {
 	BeforeEach(func() {
-		DeferCleanup(configtest.SetupConfig())
-		conf.Server.EnableMediaFileCoverArt = true
+		conf.Update(func(c *conf.Options) { c.EnableMediaFileCoverArt = true })
 	})
 	DescribeTable("FullTitle",
 		func(enabled bool, tags Tags, expected string) {
-			conf.Server.Subsonic.AppendSubtitle = enabled
+			conf.Update(func(c *conf.Options) { c.Subsonic.AppendSubtitle = enabled })
 			mf := MediaFile{Title: "Song", Tags: tags}
 			Expect(mf.FullTitle()).To(Equal(expected))
 		},
@@ -543,7 +549,7 @@ var _ = Describe("MediaFile", func() {
 	)
 	DescribeTable("FullAlbumName",
 		func(enabled bool, tags Tags, expected string) {
-			conf.Server.Subsonic.AppendAlbumVersion = enabled
+			conf.Update(func(c *conf.Options) { c.Subsonic.AppendAlbumVersion = enabled })
 			mf := MediaFile{Album: "Album", Tags: tags}
 			Expect(mf.FullAlbumName()).To(Equal(expected))
 		},
@@ -574,14 +580,14 @@ var _ = Describe("MediaFile", func() {
 			Expect(id.ID).To(Equal(mf.AlbumID))
 		})
 		It("returns disc art id if EnableMediaFileCoverArt is disabled and DiscNumber > 0", func() {
-			conf.Server.EnableMediaFileCoverArt = false
+			conf.Update(func(c *conf.Options) { c.EnableMediaFileCoverArt = false })
 			mf := MediaFile{ID: "111", AlbumID: "1", HasCoverArt: true, DiscNumber: 3}
 			id := mf.CoverArtID()
 			Expect(id.Kind).To(Equal(KindDiscArtwork))
 			Expect(id.ID).To(Equal("1:3"))
 		})
 		It("returns its album id if EnableMediaFileCoverArt is disabled and DiscNumber is 0", func() {
-			conf.Server.EnableMediaFileCoverArt = false
+			conf.Update(func(c *conf.Options) { c.EnableMediaFileCoverArt = false })
 			mf := MediaFile{ID: "111", AlbumID: "1", HasCoverArt: true}
 			id := mf.CoverArtID()
 			Expect(id.Kind).To(Equal(KindAlbumArtwork))
@@ -640,6 +646,26 @@ var _ = Describe("MediaFile", func() {
 		})
 	})
 
+})
+
+var _ = Describe("MediaFile.RecentlyAddedAt", func() {
+	birth := time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC)
+	created := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	updated := time.Date(2022, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	DescribeTable("picks the timestamp for the RecentlyAddedBy mode",
+		func(mode string, mf MediaFile, expected time.Time) {
+			conf.Update(func(c *conf.Options) { c.RecentlyAddedBy = mode })
+			Expect(mf.RecentlyAddedAt()).To(Equal(expected))
+		},
+		Entry("scan uses CreatedAt", consts.RecentlyAddedByScan, MediaFile{BirthTime: birth, CreatedAt: created, UpdatedAt: updated}, created),
+		Entry("scan falls back to UpdatedAt", consts.RecentlyAddedByScan, MediaFile{BirthTime: birth, UpdatedAt: updated}, updated),
+		Entry("scan falls back to BirthTime", consts.RecentlyAddedByScan, MediaFile{BirthTime: birth}, birth),
+		Entry("birth uses BirthTime", consts.RecentlyAddedByBirth, MediaFile{BirthTime: birth, CreatedAt: created, UpdatedAt: updated}, birth),
+		Entry("birth falls back to CreatedAt", consts.RecentlyAddedByBirth, MediaFile{CreatedAt: created, UpdatedAt: updated}, created),
+		Entry("modtime uses UpdatedAt", consts.RecentlyAddedByModTime, MediaFile{BirthTime: birth, CreatedAt: created, UpdatedAt: updated}, updated),
+		Entry("modtime falls back to CreatedAt", consts.RecentlyAddedByModTime, MediaFile{BirthTime: birth, CreatedAt: created}, created),
+	)
 })
 
 var _ = DescribeTable("MediaFile.HasEmbeddedLyrics",

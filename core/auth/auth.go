@@ -40,7 +40,7 @@ const (
 func Init(ds model.DataStore) {
 	once.Do(func() {
 		ctx := context.TODO()
-		log.Info("Setting Session Timeout", "value", conf.Server.SessionTimeout)
+		log.Info("Setting Session Timeout", "value", conf.Server().SessionTimeout)
 
 		TokenAuth = jwtauth.New("HS256", []byte(loadOrCreateSecret(ctx, ds, consts.JWTSecretKey)), nil)
 		PublicTokenAuth = jwtauth.New("HS256", []byte(loadOrCreateSecret(ctx, ds, consts.JWTPublicSecretKey)), nil)
@@ -48,12 +48,12 @@ func Init(ds model.DataStore) {
 }
 
 func loadOrCreateSecret(ctx context.Context, ds model.DataStore, key string) string {
-	secret, err := ds.Property(ctx).Get(key)
+	secret, err := ds.Property().Get(ctx, key)
 	if err != nil || secret == "" {
 		log.Info(ctx, "Creating new JWT secret", "key", key)
 		return createNewSecret(ctx, ds, key)
 	}
-	if secret, err = utils.Decrypt(ctx, getEncKey(), secret); err != nil {
+	if secret, err = utils.Decrypt(ctx, EncryptionKey(), secret); err != nil {
 		log.Error(ctx, "Could not decrypt JWT secret, creating a new one", "key", key, err)
 		return createNewSecret(ctx, ds, key)
 	}
@@ -132,7 +132,7 @@ func TouchToken(token jwt.Token) (string, error) {
 }
 
 func TouchClaims(c Claims) (string, error) {
-	c = c.WithExpiresAt(time.Now().UTC().Add(conf.Server.SessionTimeout))
+	c = c.WithExpiresAt(time.Now().UTC().Add(conf.Server().SessionTimeout))
 	if !c.SessionExpiresAt.IsZero() {
 		if !time.Now().Before(c.SessionExpiresAt) {
 			return "", errors.New("session expired")
@@ -186,9 +186,9 @@ func CheckClaims(c Claims, usr model.User, audience string) error {
 }
 
 func WithAdminUser(ctx context.Context, ds model.DataStore) context.Context {
-	u, err := ds.User(ctx).FindFirstAdmin()
+	u, err := ds.User().FindFirstAdmin(ctx)
 	if err != nil {
-		c, err := ds.User(ctx).CountAll()
+		c, err := ds.User().CountAll(ctx)
 		if c == 0 && err == nil {
 			log.Debug(ctx, "No admin user yet!", err)
 		} else {
@@ -203,12 +203,13 @@ func WithAdminUser(ctx context.Context, ds model.DataStore) context.Context {
 
 func createNewSecret(ctx context.Context, ds model.DataStore, key string) string {
 	secret := id.NewRandom()
-	encSecret, err := utils.Encrypt(ctx, getEncKey(), secret)
+	encSecret, err := utils.Encrypt(ctx, EncryptionKey(), secret)
 	if err != nil {
 		log.Error(ctx, "Could not encrypt JWT secret", err)
 		return secret
 	}
-	if err := ds.Property(ctx).Put(key, encSecret); err != nil {
+	ctx = log.WithSecrets(ctx, encSecret)
+	if err := ds.Property().Put(ctx, key, encSecret); err != nil {
 		log.Error(ctx, "Could not save JWT secret in DB", err)
 	}
 	return secret
@@ -227,9 +228,9 @@ func DecodeAndVerifyToken(tokenStr string) (jwt.Token, error) {
 	return jwtauth.VerifyToken(TokenAuth, tokenStr)
 }
 
-func getEncKey() []byte {
+func EncryptionKey() []byte {
 	key := cmp.Or(
-		conf.Server.PasswordEncryptionKey,
+		conf.Server().PasswordEncryptionKey,
 		consts.DefaultEncryptionKey,
 	)
 	sum := sha256.Sum256([]byte(key))

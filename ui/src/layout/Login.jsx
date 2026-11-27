@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import PropTypes from 'prop-types'
 import { Field, Form } from 'react-final-form'
 import { useDispatch } from 'react-redux'
+import { useHistory } from 'react-router-dom'
 import Button from '@material-ui/core/Button'
 import Card from '@material-ui/core/Card'
 import CardActions from '@material-ui/core/CardActions'
@@ -11,6 +12,7 @@ import TextField from '@material-ui/core/TextField'
 import { ThemeProvider, makeStyles } from '@material-ui/core/styles'
 import {
   createMuiTheme,
+  useCheckAuth,
   useLogin,
   useNotify,
   useTranslate,
@@ -385,6 +387,16 @@ const Login = ({ location }) => {
   const handledOIDC = useRef(false)
   const autoRedirect =
     config.oidcEnabled && config.oidcAutoRedirect && !config.firstTime
+  const checkAuth = useCheckAuth()
+  const history = useHistory()
+
+  // Signed-in users opening #/login go straight to the app;
+  // replace keeps Back from bouncing.
+  useEffect(() => {
+    checkAuth({}, false)
+      .then(() => history.replace('/'))
+      .catch(() => {})
+  }, [checkAuth, history])
 
   const handleSubmit = useCallback(
     (auth) => {

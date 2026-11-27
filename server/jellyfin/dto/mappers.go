@@ -3,6 +3,7 @@ package dto
 import (
 	"cmp"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/navidrome/navidrome/conf"
@@ -14,13 +15,13 @@ import (
 // sortName must match the persistence ORDER BY key (see setSortMappings): Finamp's A-Z jump
 // scans SortName client-side, and any mismatch with the server's sort order scrolls to the top.
 func sortName(sortTag, orderName, displayName string) string {
-	if conf.Server.PreferSortTags {
+	if conf.Server().PreferSortTags {
 		return cmp.Or(sortTag, orderName, displayName)
 	}
 	return cmp.Or(orderName, displayName)
 }
 
-// Jellyfin wire times are ticks: 100ns units, i.e. 10,000 per millisecond.
+// ticksPerMillis converts Jellyfin wire times, which are ticks: 100ns units, i.e. 10,000 per millisecond.
 const ticksPerMillis = 10_000
 
 func TicksFromSeconds(sec float32) int64 { return int64(float64(sec) * 1000 * ticksPerMillis) }
@@ -51,16 +52,16 @@ func premiereDate(date string, year int) *string {
 	if err != nil {
 		return nil
 	}
-	s := jellyfinDate(&parsed)
+	s := JellyfinDate(&parsed)
 	return &s
 }
 
-// Dates use .NET's round-trip layout, 7 fractional digits and all: Manet rejects plain RFC3339.
+// jellyfinDateLayout is .NET's round-trip layout, 7 fractional digits and all: Manet rejects plain RFC3339.
 const jellyfinDateLayout = "2006-01-02T15:04:05.0000000Z07:00"
 
-// jellyfinDate formats t as the date string clients expect, or "" for the zero time so the
+// JellyfinDate formats t as the date string clients expect, or "" for the zero time so the
 // field is omitted rather than sent as a meaningless epoch.
-func jellyfinDate(t *time.Time) string {
+func JellyfinDate(t *time.Time) string {
 	if t == nil || t.IsZero() {
 		return ""
 	}
@@ -121,6 +122,30 @@ func MediaSourceFromMediaFile(mf model.MediaFile) MediaSourceInfo {
 	}
 }
 
+// minLikeRating is Jellyfin's UserItemData.MinLikeValue: a rating at or above it reads as Likes.
+const minLikeRating = 6.5
+
+// StarsFromRating maps Jellyfin's 0-10 rating to 0-5 stars, rejecting out-of-range values and NaN.
+// A nonzero rating floors at one star, since 0 stars means "not rated".
+func StarsFromRating(rating float64) (int, bool) {
+	if !(rating >= 0 && rating <= 10) {
+		return 0, false
+	}
+	stars := int(math.Round(rating / 2))
+	if rating > 0 {
+		stars = max(stars, 1)
+	}
+	return stars, true
+}
+
+// StarsFromLikes mirrors Jellyfin, which stores likes as Rating 10 and dislikes as Rating 1.
+func StarsFromLikes(likes bool) int {
+	if likes {
+		return 5
+	}
+	return 1
+}
+
 func UserData(a model.Annotations, itemID string) *UserItemDataDto {
 	// Callers pass the raw model id; encode here so Key/ItemId match the encoded Id on the BaseItemDto.
 	encodedID := EncodeID(itemID)
@@ -134,8 +159,9 @@ func UserData(a model.Annotations, itemID string) *UserItemDataDto {
 	if a.Rating > 0 {
 		r := float64(a.Rating) * 2 // Navidrome 0-5 -> Jellyfin 0-10
 		d.Rating = &r
+		d.Likes = new(r >= minLikeRating)
 	}
-	if s := jellyfinDate(a.PlayDate); s != "" {
+	if s := JellyfinDate(a.PlayDate); s != "" {
 		d.LastPlayedDate = &s
 	}
 	return d
@@ -159,7 +185,7 @@ func SongToBaseItem(mf model.MediaFile, fields Fields) BaseItemDto {
 		AlbumId:           albumID,
 		AlbumArtist:       mf.AlbumArtist,
 		RunTimeTicks:      TicksFromSeconds(mf.Duration),
-		DateCreated:       jellyfinDate(&mf.CreatedAt),
+		DateCreated:       JellyfinDate(new(mf.RecentlyAddedAt())),
 		Container:         mf.Suffix,
 		CanDownload:       true,
 		BackdropImageTags: []string{},
@@ -231,8 +257,8 @@ func SongToBaseItem(mf model.MediaFile, fields Fields) BaseItemDto {
 }
 
 func embeddedArtPending(mf model.MediaFile) bool {
-	return mf.HasCoverArt && conf.Server.EnableMediaFileCoverArt &&
-		mf.ImageHash == "" && !mf.ItemImage.ImageAbsent
+	return mf.HasCoverArt && conf.Server().EnableMediaFileCoverArt &&
+		mf.ImageHash == "" && !mf.ImageAbsent
 }
 
 // primaryImage never fakes a blurhash: clients key their cover cache on the value, which would
@@ -265,7 +291,7 @@ func AlbumToBaseItem(al model.Album, fields Fields) BaseItemDto {
 		ChildCount:              new(al.SongCount),
 		SongCount:               new(al.SongCount),
 		RunTimeTicks:            TicksFromSeconds(al.Duration),
-		DateCreated:             jellyfinDate(&al.CreatedAt),
+		DateCreated:             JellyfinDate(new(al.RecentlyAddedAt())),
 		ImageBlurHashes:         blurs,
 		PrimaryImageAspectRatio: ratio,
 		BackdropImageTags:       []string{},
@@ -318,7 +344,7 @@ func ArtistToBaseItem(ar model.Artist, fields Fields) BaseItemDto {
 		IsFolder:                true,
 		AlbumCount:              new(ar.AlbumCount),
 		SongCount:               new(ar.SongCount),
-		DateCreated:             jellyfinDate(ar.CreatedAt),
+		DateCreated:             JellyfinDate(ar.CreatedAt),
 		ImageBlurHashes:         blurs,
 		PrimaryImageAspectRatio: ratio,
 		BackdropImageTags:       []string{},
@@ -346,7 +372,7 @@ func LibraryToBaseItem(lib model.Library) BaseItemDto {
 		IsFolder:          true,
 		Path:              lib.Path,
 		LocationType:      "FileSystem",
-		DateCreated:       jellyfinDate(&lib.CreatedAt),
+		DateCreated:       JellyfinDate(&lib.CreatedAt),
 		ChildCount:        new(lib.TotalAlbums),
 		UserData:          &UserItemDataDto{Key: id, ItemId: id},
 		BackdropImageTags: []string{},
@@ -386,7 +412,7 @@ func PlaylistToBaseItem(p model.Playlist, fields Fields) BaseItemDto {
 		MediaType:               "Audio",
 		ChildCount:              new(p.SongCount),
 		RunTimeTicks:            TicksFromSeconds(p.Duration),
-		DateCreated:             jellyfinDate(&p.CreatedAt),
+		DateCreated:             JellyfinDate(&p.CreatedAt),
 		ImageBlurHashes:         blurs,
 		PrimaryImageAspectRatio: ratio,
 		BackdropImageTags:       []string{},
@@ -460,12 +486,52 @@ func NewSessionInfo(u *model.User, client, deviceID, deviceName, version, server
 		DeviceName:         deviceName,
 		ApplicationVersion: version,
 		ServerId:           serverID,
-		LastActivityDate:   jellyfinDate(&now),
+		LastActivityDate:   JellyfinDate(&now),
 		IsActive:           true,
 		PlayableMediaTypes: []string{"Audio"},
 		SupportedCommands:  []string{},
 		AdditionalUsers:    []any{},
 		NowPlayingQueue:    []any{},
 		PlayState:          PlayerStateInfo{RepeatMode: "RepeatNone", PlaybackOrder: "Default"},
+	}
+}
+
+// RadioToBaseItem maps an internet radio station to a Live TV radio channel, the shape Jellyfin
+// clients list stations in (GET /LiveTv/Channels).
+func RadioToBaseItem(rd model.Radio) BaseItemDto {
+	item := BaseItemDto{
+		Name:              rd.Name,
+		Id:                EncodeID(rd.ID),
+		Type:              "TvChannel",
+		ChannelType:       "Radio",
+		MediaType:         "Audio",
+		LocationType:      "Remote",
+		BackdropImageTags: []string{},
+	}
+	// An uploaded image is a station's only art source, as in Subsonic's getInternetRadioStations.
+	if rd.UploadedImage != "" && !rd.ImageAbsent {
+		tag, blurs, _ := primaryImage(rd.ItemImage, rd.ID, nil)
+		item.ImageTags = map[string]string{"Primary": tag}
+		item.ImageBlurHashes = blurs
+	}
+	return item
+}
+
+// MediaSourceFromRadio points clients straight at the station URL. RequiresOpening stays false so
+// they skip Jellyfin's LiveStreams/Open step, which Navidrome doesn't implement.
+func MediaSourceFromRadio(rd model.Radio) MediaSourceInfo {
+	return MediaSourceInfo{
+		Id:                 EncodeID(rd.ID),
+		Path:               rd.StreamUrl,
+		Protocol:           "Http",
+		Name:               rd.Name,
+		Type:               "Default",
+		IsRemote:           true,
+		IsInfiniteStream:   true,
+		SupportsDirectPlay: true,
+		// Index -1 is real Jellyfin's "unknown position" for a live stream's audio track.
+		MediaStreams:     []MediaStream{{Type: "Audio", Index: -1}},
+		MediaAttachments: []any{},
+		Formats:          []string{},
 	}
 }

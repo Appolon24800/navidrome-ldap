@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,7 +24,7 @@ import (
 	"github.com/navidrome/navidrome/model/request"
 	"github.com/navidrome/navidrome/server"
 	"github.com/navidrome/navidrome/server/subsonic/responses"
-	. "github.com/navidrome/navidrome/utils/gg"
+	"github.com/navidrome/navidrome/utils/gg"
 	"github.com/navidrome/navidrome/utils/req"
 )
 
@@ -65,14 +64,15 @@ func checkRequiredParameters(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var requiredParameters []string
 
+		p := req.Params(r)
 		username, _ := fromInternalOrProxyAuth(r)
-		if username != "" {
+		apiKey, _ := p.String("apiKey")
+		if username != "" || apiKey != "" {
 			requiredParameters = []string{"v", "c"}
 		} else {
 			requiredParameters = []string{"u", "v", "c"}
 		}
 
-		p := req.Params(r)
 		for _, param := range requiredParameters {
 			if _, err := p.String(param); err != nil {
 				log.Warn(r, err)
@@ -98,17 +98,22 @@ func checkRequiredParameters(next http.Handler) http.Handler {
 }
 
 func authenticate(ds model.DataStore) func(next http.Handler) http.Handler {
+	limiter := newAuthLimiter(conf.Server().AuthRequestLimit, conf.Server().AuthWindowLength)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 
 			var usr *model.User
+			var keyPlayer *model.Player
 			var err error
 
+			p := req.Params(r)
+			apiKey, _ := p.String("apiKey")
 			username, isInternalAuth := fromInternalOrProxyAuth(r)
-			if username != "" {
-				authType := If(isInternalAuth, "internal", "reverse-proxy")
-				usr, err = ds.User(ctx).FindByUsername(username)
+			switch {
+			case username != "":
+				authType := gg.If(isInternalAuth, "internal", "reverse-proxy")
+				usr, err = ds.User().FindByUsername(ctx, username)
 				if errors.Is(err, context.Canceled) {
 					log.Debug(ctx, "API: Request canceled when authenticating", "auth", authType, "username", username, "remoteAddr", r.RemoteAddr, err)
 					return
@@ -118,18 +123,34 @@ func authenticate(ds model.DataStore) func(next http.Handler) http.Handler {
 				} else if err != nil {
 					log.Error(ctx, "API: Error authenticating username", "auth", authType, "username", username, "remoteAddr", r.RemoteAddr, err)
 				}
-			} else {
-				p := req.Params(r)
+			case apiKey != "":
+				usr, keyPlayer, err = authenticateAPIKey(ctx, ds, limiter, r, apiKey)
+				if err != nil {
+					if ctx.Err() == nil {
+						sendError(w, r, err)
+					}
+					return
+				}
+				ctx = request.WithUsername(ctx, usr.UserName)
+			default:
 				username, _ := p.String("u")
 				pass, _ := p.String("p")
-				if strings.HasPrefix(pass, "enc:") {
-					if dec, err := hex.DecodeString(pass[4:]); err == nil {
-						pass = string(dec)
-					}
-				}
+				pass = decodePassword(pass)
 				token, _ := p.String("t")
 				salt, _ := p.String("s")
 				jwt, _ := p.String("jwt")
+
+				// Blocked attempts get the same response as a wrong password, so they reveal nothing
+				limitKey := server.ClientIP(r) + "\x00" + strings.ToLower(username)
+				slot, allowed := limiter.acquire(ctx, limitKey)
+				if !allowed {
+					if ctx.Err() != nil {
+						return
+					}
+					log.Warn(ctx, "API: Too many failed login attempts", "auth", "subsonic", "username", username, "remoteAddr", r.RemoteAddr)
+					sendError(w, r, newError(responses.ErrorAuthenticationFail))
+					return
+				}
 
 				// App-password fast path. When the request carries a `p` or
 				// salt+token, try matching against the user's active app
@@ -149,7 +170,8 @@ func authenticate(ds model.DataStore) func(next http.Handler) http.Handler {
 				if jwt == "" && (pass != "" || token != "") {
 					lookupUsr, appID, ok := matchAppPassword(ctx, ds, username, pass, token, salt)
 					if ok {
-						if touchErr := ds.AppPassword(ctx).Touch(appID); touchErr != nil {
+						slot.release(false)
+						if touchErr := ds.AppPassword().Touch(ctx, appID); touchErr != nil {
 							log.Warn(ctx, "API: Failed to bump app password last_used_at", "id", appID, "username", username, touchErr)
 						}
 						ctx = request.WithUser(ctx, *lookupUsr)
@@ -157,6 +179,7 @@ func authenticate(ds model.DataStore) func(next http.Handler) http.Handler {
 						return
 					}
 					if lookupUsr != nil && lookupUsr.IsLDAP() {
+						slot.release(true)
 						log.Warn(ctx, "API: Rejecting non-app-password Subsonic auth for LDAP user", "username", username, "remoteAddr", r.RemoteAddr)
 						sendError(w, r, newError(responses.ErrorAuthenticationFail))
 						return
@@ -164,30 +187,33 @@ func authenticate(ds model.DataStore) func(next http.Handler) http.Handler {
 				}
 
 				if pass != "" {
-					usr, err = server.ValidateLogin(ds.User(ctx), username, pass)
+					usr, err = server.ValidateLogin(ctx, ds.User(), username, pass)
 					if err == nil && usr == nil {
-						err = model.ErrNotFound
+						// The password failed. Load the user anyway, so an API key sent as the password can still be tried.
+						usr, err = ds.User().FindByUsername(ctx, username)
+						if err == nil {
+							err = model.ErrInvalidAuth
+						}
 					}
 				} else {
-					usr, err = ds.User(ctx).FindByUsernameWithPassword(username)
+					usr, err = ds.User().FindByUsernameWithPassword(ctx, username)
+					if err == nil {
+						err = validateCredentials(usr, pass, token, salt, jwt)
+					}
 				}
-
-				if errors.Is(err, context.Canceled) {
+				if errors.Is(err, model.ErrInvalidAuth) && pass != "" && jwt == "" {
+					keyPlayer, err = playerFromPasswordKey(ctx, ds, usr, pass)
+				}
+				invalidLogin := errors.Is(err, model.ErrNotFound) || errors.Is(err, model.ErrInvalidAuth)
+				slot.release(invalidLogin)
+				switch {
+				case errors.Is(err, context.Canceled):
 					log.Debug(ctx, "API: Request canceled when authenticating", "auth", "subsonic", "username", username, "remoteAddr", r.RemoteAddr, err)
 					return
-				}
-				switch {
-				case errors.Is(err, model.ErrNotFound):
+				case invalidLogin:
 					log.Warn(ctx, "API: Invalid login", "auth", "subsonic", "username", username, "remoteAddr", r.RemoteAddr, err)
 				case err != nil:
 					log.Error(ctx, "API: Error authenticating username", "auth", "subsonic", "username", username, "remoteAddr", r.RemoteAddr, err)
-				default:
-					if pass == "" {
-						err = validateCredentials(usr, pass, token, salt, jwt)
-						if err != nil {
-							log.Warn(ctx, "API: Invalid login", "auth", "subsonic", "username", username, "remoteAddr", r.RemoteAddr, err)
-						}
-					}
 				}
 			}
 
@@ -197,9 +223,75 @@ func authenticate(ds model.DataStore) func(next http.Handler) http.Handler {
 			}
 
 			ctx = request.WithUser(ctx, *usr)
+			if keyPlayer != nil {
+				ctx = request.WithPlayer(ctx, *keyPlayer)
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+var apiKeyConflicts = []string{"u", "p", "t", "s", "jwt"}
+
+func authenticateAPIKey(ctx context.Context, ds model.DataStore, limiter *authLimiter, r *http.Request, key string) (*model.User, *model.Player, error) {
+	query := r.URL.Query()
+	for _, param := range apiKeyConflicts {
+		if query.Has(param) {
+			log.Warn(ctx, "API: apiKey sent with other credentials", "auth", "apikey", "param", param, "remoteAddr", r.RemoteAddr)
+			return nil, nil, newError(responses.ErrorMultipleAuthMechanismsProvided)
+		}
+	}
+
+	// Per key, so a stale key on one device cannot lock out valid keys sharing the IP
+	slot, allowed := limiter.acquire(ctx, "apikey\x00"+server.ClientIP(r)+"\x00"+key)
+	if !allowed {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		log.Warn(ctx, "API: Too many failed API key attempts", "auth", "apikey", "remoteAddr", r.RemoteAddr)
+		return nil, nil, newError(responses.ErrorInvalidAPIKey)
+	}
+
+	player, err := ds.Player().FindByAPIKey(ctx, key)
+	var usr *model.User
+	if err == nil {
+		usr, err = ds.User().Get(ctx, player.UserId)
+	}
+	slot.release(errors.Is(err, model.ErrNotFound))
+	switch {
+	case errors.Is(err, context.Canceled):
+		return nil, nil, err
+	case errors.Is(err, model.ErrNotFound):
+		log.Warn(ctx, "API: Invalid API key", "auth", "apikey", "remoteAddr", r.RemoteAddr)
+		return nil, nil, newError(responses.ErrorInvalidAPIKey)
+	case err != nil:
+		log.Error(ctx, "API: Error authenticating API key", "auth", "apikey", "remoteAddr", r.RemoteAddr, err)
+		return nil, nil, newError(responses.ErrorAuthenticationFail)
+	}
+	return usr, player, nil
+}
+
+// playerFromPasswordKey lets clients that only have a password field log in with an API key.
+// It returns ErrInvalidAuth when pass is not a key of usr, so only real failures skip the limiter count.
+func playerFromPasswordKey(ctx context.Context, ds model.DataStore, usr *model.User, pass string) (*model.Player, error) {
+	key := decodePassword(pass)
+	if !strings.HasPrefix(key, consts.APIKeyPrefix) {
+		return nil, model.ErrInvalidAuth
+	}
+	plr, err := ds.Player().FindByAPIKey(ctx, key)
+	if errors.Is(err, model.ErrNotFound) || (err == nil && plr.UserId != usr.ID) {
+		return nil, model.ErrInvalidAuth
+	}
+	return plr, err
+}
+
+func decodePassword(pass string) string {
+	if strings.HasPrefix(pass, "enc:") {
+		if dec, err := hex.DecodeString(pass[4:]); err == nil {
+			return string(dec)
+		}
+	}
+	return pass
 }
 
 func adminOnly(next http.Handler) http.Handler {
@@ -229,15 +321,10 @@ func validateCredentials(user *model.User, pass, token, salt, jwt string) error 
 			claims.Subject == user.UserName &&
 			auth.CheckClaims(claims, *user, auth.AudienceSubsonic) == nil
 	case pass != "":
-		if strings.HasPrefix(pass, "enc:") {
-			if dec, err := hex.DecodeString(pass[4:]); err == nil {
-				pass = string(dec)
-			}
-		}
 		// Empty stored password (LDAP users post-ClearPassword, mid-migration
 		// rows, etc.) must never be a valid credential — the comparison
 		// `"" == ""` would otherwise succeed.
-		valid = pass != "" && user.Password != "" && pass == user.Password
+		valid = user.Password != "" && decodePassword(pass) == user.Password
 	case token != "":
 		if user.Password == "" {
 			break
@@ -266,11 +353,11 @@ func matchAppPassword(ctx context.Context, ds model.DataStore, username, pass, t
 	if username == "" {
 		return nil, "", false
 	}
-	usr, err := ds.User(ctx).FindByUsername(username)
+	usr, err := ds.User().FindByUsername(ctx, username)
 	if err != nil {
 		return nil, "", false
 	}
-	active, err := ds.AppPassword(ctx).FindActiveByUser(usr.ID)
+	active, err := ds.AppPassword().FindActiveByUser(ctx, usr.ID)
 	if err != nil {
 		log.Warn(ctx, "API: Error loading app passwords", "username", username, err)
 		return usr, "", false
@@ -292,12 +379,20 @@ func getPlayer(players core.Players) func(next http.Handler) http.Handler {
 			ctx := r.Context()
 			userName, _ := request.UsernameFrom(ctx)
 			client, _ := request.ClientFrom(ctx)
-			playerId := playerIDFromCookie(r, userName)
-			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			ip := middleware.GetClientIP(r.Context())
 			userAgent := canonicalUserAgent(r)
-			player, trc, err := players.Register(ctx, playerId, client, userAgent, ip)
+
+			var player *model.Player
+			var trc *model.Transcoding
+			var err error
+			keyPlayer, boundByKey := request.PlayerFrom(ctx)
+			if boundByKey {
+				player, trc, err = players.Touch(ctx, keyPlayer, client, userAgent, ip)
+			} else {
+				player, trc, err = players.Register(ctx, playerIDFromCookie(r, userName), client, userAgent, ip)
+			}
 			if err != nil {
-				log.Error(ctx, "Could not register player", "username", userName, "client", client, err)
+				log.Error(ctx, "Could not resolve player", "username", userName, "client", client, err)
 			} else {
 				ctx = request.WithPlayer(ctx, *player)
 				if trc != nil {
@@ -305,13 +400,18 @@ func getPlayer(players core.Players) func(next http.Handler) http.Handler {
 				}
 				r = r.WithContext(ctx)
 
+				// A key already identifies the player, so the cookie would only add a second, weaker signal
+				if boundByKey {
+					next.ServeHTTP(w, r)
+					return
+				}
 				cookie := &http.Cookie{ //nolint:gosec // Secure omitted: Navidrome may run over plain HTTP
 					Name:     playerIDCookieName(userName),
 					Value:    player.ID,
 					MaxAge:   consts.CookieExpiry,
 					HttpOnly: true,
 					SameSite: http.SameSiteStrictMode,
-					Path:     cmp.Or(conf.Server.BasePath, "/"),
+					Path:     cmp.Or(conf.Server().BasePath, "/"),
 				}
 				http.SetCookie(w, cookie)
 			}

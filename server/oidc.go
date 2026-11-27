@@ -54,14 +54,14 @@ type oidcLogin struct {
 }
 
 func newOIDCLogin(ds model.DataStore) *oidcLogin {
-	o := conf.Server.OIDC
+	o := conf.Server().OIDC
 	redirect, _ := url.Parse(o.RedirectURL) // Validated when loading configuration.
 	return &oidcLogin{
 		ds: ds, client: &http.Client{Timeout: 10 * time.Second},
 		oauth: oauth2.Config{ClientID: o.ClientID, ClientSecret: o.ClientSecret,
 			RedirectURL: o.RedirectURL, Scopes: []string{oidc.ScopeOpenID, oidc.ScopeProfile, oidc.ScopeEmail}},
 		issuer: o.IssuerURL, origin: redirect.Scheme + "://" + strings.ToLower(redirect.Host), secure: redirect.Scheme == "https",
-		uiURL:   path.Join(conf.Server.BasePath, consts.URLPathUI) + "/#/login",
+		uiURL:   path.Join(conf.Server().BasePath, consts.URLPathUI) + "/#/login",
 		maxAge:  o.MaxSessionDuration,
 		pending: make(map[string]oidcTransaction),
 	}
@@ -76,10 +76,10 @@ func (o *oidcLogin) mount(r chi.Router) {
 				next.ServeHTTP(w, r)
 			})
 		})
-		if conf.Server.AuthRequestLimit > 0 {
+		if conf.Server().AuthRequestLimit > 0 {
 			// Limit authorization attempts, without stranding an accepted flow at
 			// its callback or cookie exchange when another login shares this IP.
-			r.With(ClientIPRateLimiter(conf.Server.AuthRequestLimit, conf.Server.AuthWindowLength)).Get("/login", o.start)
+			r.With(ClientIPRateLimiter(conf.Server().AuthRequestLimit, conf.Server().AuthWindowLength)).Get("/login", o.start)
 		} else {
 			r.Get("/login", o.start)
 		}
@@ -115,7 +115,7 @@ func (o *oidcLogin) discover(ctx context.Context) (*oidc.Provider, error) {
 }
 
 func (o *oidcLogin) cookie(w http.ResponseWriter, value string, maxAge int) {
-	cookiePath := path.Join(conf.Server.BasePath, "/auth/oidc")
+	cookiePath := path.Join(conf.Server().BasePath, "/auth/oidc")
 	if o.secure {
 		// __Host- prohibits Domain cookies, including cookie injection from a
 		// sibling subdomain. Browsers require Path=/ for this prefix.
@@ -253,7 +253,7 @@ func (o *oidcLogin) session(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Sign-in expired. Please try again.", http.StatusUnauthorized)
 		return
 	}
-	user, err := o.ds.User(r.Context()).Get(tx.userID)
+	user, err := o.ds.User().Get(r.Context(), tx.userID)
 	if err != nil || user.TokenEpoch != tx.epoch {
 		http.Error(w, "Sign-in expired. Please try again.", http.StatusUnauthorized)
 		return
@@ -263,7 +263,7 @@ func (o *oidcLogin) session(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not create session", http.StatusInternalServerError)
 		return
 	}
-	if err := o.ds.User(r.Context()).UpdateLastLoginAt(user.ID); err != nil {
+	if err := o.ds.User().UpdateLastLoginAt(r.Context(), user.ID); err != nil {
 		log.Warn(r, "Could not update OIDC last login time")
 	}
 	payload := buildAuthPayload(user, "")

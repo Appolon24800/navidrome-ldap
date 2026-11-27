@@ -1,7 +1,6 @@
 package plugins
 
 import (
-	"context"
 	"crypto/sha256"
 
 	"encoding/hex"
@@ -16,9 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/navidrome/navidrome/conf"
-	"github.com/navidrome/navidrome/conf/configtest"
 	"github.com/navidrome/navidrome/model"
-	"github.com/navidrome/navidrome/tests"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -48,21 +45,19 @@ var _ = Describe("WebSocketService", Ordered, func() {
 		hashHex := hex.EncodeToString(hash[:])
 
 		// Setup config
-		DeferCleanup(configtest.SetupConfig())
-		conf.Server.Plugins.Enabled = true
-		conf.Server.Plugins.Folder = conf.NewDir(tmpDir)
-		conf.Server.Plugins.AutoReload = false
+		DeferCleanup(conf.SnapshotConfig())
+		conf.Update(func(c *conf.Options) {
+			c.Plugins.Enabled = true
+			c.Plugins.Folder = conf.NewDir(tmpDir)
+			c.Plugins.AutoReload = false
+		})
 
-		// Setup mock DataStore with pre-enabled plugin
-		mockPluginRepo := tests.CreateMockPluginRepo()
-		mockPluginRepo.Permitted = true
-		mockPluginRepo.SetData(model.Plugins{{
+		dataStore := newTestDataStore(model.Plugin{
 			ID:      "test-websocket",
 			Path:    destPath,
 			SHA256:  hashHex,
 			Enabled: true,
-		}})
-		dataStore := &tests.MockDataStore{MockedPlugin: mockPluginRepo}
+		})
 
 		// Create and start manager
 		manager = &Manager{
@@ -120,7 +115,6 @@ var _ = Describe("WebSocketService", Ordered, func() {
 		It("should allow hosts matching wildcard patterns", func() {
 			// test-websocket manifest allows *.example.com
 			// The pattern *.example.com matches any host ending with .example.com
-			ctx := context.Background()
 			allowed := testService.isHostAllowed("api.example.com")
 			Expect(allowed).To(BeTrue())
 
@@ -131,7 +125,6 @@ var _ = Describe("WebSocketService", Ordered, func() {
 			// But exact match without subdomain doesn't match *.example.com
 			allowed = testService.isHostAllowed("example.com")
 			Expect(allowed).To(BeFalse())
-			_ = ctx
 		})
 
 		It("should allow exact host matches", func() {
@@ -191,8 +184,8 @@ var _ = Describe("WebSocketService", Ordered, func() {
 			// the host without port
 			serverURL := strings.TrimPrefix(wsServer.URL, "http://")
 			hostOnly := serverURL
-			if idx := strings.LastIndex(serverURL, ":"); idx != -1 {
-				hostOnly = serverURL[:idx]
+			if before, _, ok := strings.CutLast(serverURL, ":"); ok {
+				hostOnly = before
 			}
 			testService.requiredHosts = append(testService.requiredHosts, hostOnly)
 		})
@@ -329,8 +322,8 @@ var _ = Describe("WebSocketService", Ordered, func() {
 
 			serverURL := strings.TrimPrefix(wsServer.URL, "http://")
 			hostOnly := serverURL
-			if idx := strings.LastIndex(serverURL, ":"); idx != -1 {
-				hostOnly = serverURL[:idx]
+			if before, _, ok := strings.CutLast(serverURL, ":"); ok {
+				hostOnly = before
 			}
 			testService.requiredHosts = append(testService.requiredHosts, hostOnly)
 		})
@@ -433,8 +426,8 @@ var _ = Describe("WebSocketService", Ordered, func() {
 
 			serverURL := strings.TrimPrefix(wsServer.URL, "http://")
 			hostOnly := serverURL
-			if idx := strings.LastIndex(serverURL, ":"); idx != -1 {
-				hostOnly = serverURL[:idx]
+			if before, _, ok := strings.CutLast(serverURL, ":"); ok {
+				hostOnly = before
 			}
 			testService.requiredHosts = append(testService.requiredHosts, hostOnly)
 		})
@@ -505,6 +498,7 @@ var _ = Describe("WebSocketService", Ordered, func() {
 		var savedHosts []string
 
 		BeforeEach(func() {
+			stubLocalhostDNS()
 			savedHosts = testService.requiredHosts
 			upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 			wsServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -567,8 +561,8 @@ var _ = Describe("WebSocketService", Ordered, func() {
 
 			serverURL := strings.TrimPrefix(wsServer.URL, "http://")
 			hostOnly := serverURL
-			if idx := strings.LastIndex(serverURL, ":"); idx != -1 {
-				hostOnly = serverURL[:idx]
+			if before, _, ok := strings.CutLast(serverURL, ":"); ok {
+				hostOnly = before
 			}
 			testService.requiredHosts = append(testService.requiredHosts, hostOnly)
 

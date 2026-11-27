@@ -38,18 +38,13 @@ func newDB(ctx context.Context, upTo int64) *sql.DB {
 	return d
 }
 
-// openMismatchedIndexDB builds a database whose index is declared over a different
-// column than the one it was populated from, so integrity_check reports one issue per row.
-func openMismatchedIndexDB(ctx context.Context, rows int) *sql.DB {
+// writeMismatchedIndex adds an index declared over a different column than the one it
+// was populated from, so integrity_check reports one issue per row and quick_check none.
+func writeMismatchedIndex(ctx context.Context, path string, rows int) {
 	GinkgoHelper()
-	path := filepath.Join(GinkgoT().TempDir(), "mismatched.db")
-	open := func() *sql.DB {
-		d, err := sql.Open(db.Dialect, path)
-		Expect(err).ToNot(HaveOccurred())
-		d.SetMaxOpenConns(1)
-		return d
-	}
-	d := open()
+	d, err := sql.Open(db.Dialect, path)
+	Expect(err).ToNot(HaveOccurred())
+	d.SetMaxOpenConns(1)
 	for _, stmt := range []string{
 		`create table t(a, b)`,
 		fmt.Sprintf(`with recursive s(x) as (select 1 union all select x+1 from s where x < %d)
@@ -62,8 +57,16 @@ func openMismatchedIndexDB(ctx context.Context, rows int) *sql.DB {
 		Expect(err).ToNot(HaveOccurred())
 	}
 	Expect(d.Close()).To(Succeed()) // reopen so SQLite reparses the doctored schema
+}
 
-	d = open()
+func openMismatchedIndexDB(ctx context.Context, rows int) *sql.DB {
+	GinkgoHelper()
+	path := filepath.Join(GinkgoT().TempDir(), "mismatched.db")
+	writeMismatchedIndex(ctx, path, rows)
+
+	d, err := sql.Open(db.Dialect, path)
+	Expect(err).ToNot(HaveOccurred())
+	d.SetMaxOpenConns(1)
 	DeferCleanup(func() { _ = d.Close() })
 	return d
 }
@@ -93,7 +96,7 @@ var _ = Describe("RebuildFTS schema guard", func() {
 	var ctx context.Context
 
 	BeforeEach(func() {
-		ctx = context.Background()
+		ctx = GinkgoT().Context()
 	})
 
 	It("refuses to run on a schema older than the FTS migration", func() {
@@ -126,7 +129,7 @@ var _ = Describe("Repair", func() {
 	)
 
 	BeforeEach(func() {
-		ctx = context.Background()
+		ctx = GinkgoT().Context()
 		database = newDB(ctx, 0)
 
 		for _, stmt := range []string{
@@ -167,7 +170,7 @@ var _ = Describe("Repair", func() {
 			Expect(rows.Scan(&name, &ddl)).To(Succeed())
 			schema[name] = ws.ReplaceAllString(ddl, " ")
 		}
-		Expect(rows.Err()).ToNot(HaveOccurred())
+		Expect(rows.Err()).To(Succeed())
 		return schema
 	}
 

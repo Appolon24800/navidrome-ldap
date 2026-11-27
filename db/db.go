@@ -20,7 +20,7 @@ import (
 )
 
 // NaturalCollation sorts embedded numbers by value. It is registered on every
-// connection, but only referenced when conf.Server.EnableNaturalSorting is on.
+// connection, but only referenced when conf.Server().EnableNaturalSorting is on.
 const NaturalCollation = "NATSORT"
 
 var (
@@ -34,8 +34,8 @@ var embedMigrations embed.FS
 
 const migrationsFolder = "migrations"
 
-// sql.Register panics if called twice, so guard it: the singleton instance can be reset
-// (tests/benchmarks) and rebuilt, but the driver is process-global and registers only once.
+// registerDriverOnce guards sql.Register, which panics if called twice: the singleton instance can be
+// reset (tests/benchmarks) and rebuilt, but the driver is process-global and registers only once.
 var registerDriverOnce sync.Once
 
 func Db() *sql.DB {
@@ -50,12 +50,12 @@ func Db() *sql.DB {
 				},
 			})
 		})
-		Path = conf.Server.DbPath
+		Path = conf.Server().DbPath
 		if Path == ":memory:" {
 			Path = "file::memory:?cache=shared&_foreign_keys=on"
-			conf.Server.DbPath = Path
+			conf.Update(func(c *conf.Options) { c.DbPath = Path })
 		} else {
-			conf.Server.DataFolder.MustPath()
+			conf.Server().DataFolder.MustPath()
 		}
 		log.Debug("Opening DataBase", "dbPath", Path, "driver", Driver)
 		db, err := sql.Open(Driver, Path)
@@ -133,6 +133,12 @@ func ErrorCodes(err error) (code, extended int, ok bool) {
 	return int(se.Code), int(se.ExtendedCode), true
 }
 
+// IsBusy reports whether err is SQLITE_BUSY, including BUSY_SNAPSHOT, which only a new transaction clears.
+func IsBusy(err error) bool {
+	code, _, ok := ErrorCodes(err)
+	return ok && code == int(sqlite3.ErrBusy)
+}
+
 type statusLogger struct{ numPending int }
 
 func (*statusLogger) Fatalf(format string, v ...any) { log.Fatal(fmt.Sprintf(format, v...)) }
@@ -178,7 +184,7 @@ func isSchemaEmpty(ctx context.Context, db *sql.DB) bool {
 }
 
 type logAdapter struct {
-	ctx    context.Context
+	ctx    context.Context //nolint:containedctx // goose logger interface has no ctx
 	silent bool
 }
 

@@ -19,12 +19,21 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/navidrome/navidrome/conf"
-	"github.com/navidrome/navidrome/conf/configtest"
 	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/core/auth"
+	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/persistence"
+	"github.com/navidrome/navidrome/persistence/persistencetest"
 	"github.com/navidrome/navidrome/tests"
 )
+
+// unavailableUserRepo fails user lookups the way a database outage would.
+type unavailableUserRepo struct{ model.UserRepository }
+
+func (unavailableUserRepo) FindByUsername(context.Context, string) (*model.User, error) {
+	return nil, errors.New("database unavailable")
+}
 
 // A real discovery/JWKS/code-exchange fixture exercises signature validation and
 // PKCE, rather than stubbing the OIDC verifier used in production.
@@ -103,19 +112,24 @@ func (p *oidcTestProvider) serve(w http.ResponseWriter, r *http.Request) {
 
 func setupOIDC(t *testing.T) (*oidcLogin, *oidcTestProvider, *model.User) {
 	t.Helper()
-	t.Cleanup(configtest.SetupConfig())
+	// Each test gets its own migrated database and leaves the configuration as it found it.
+	tests.Init(t, false)
+	persistencetest.Init(t)
+	t.Cleanup(conf.SnapshotConfig())
 	p := newOIDCTestProvider(t)
-	conf.Server.BasePath = "/music"
-	conf.Server.SessionTimeout = 24 * time.Hour
-	conf.Server.OIDC.Enabled = true
-	conf.Server.OIDC.IssuerURL = p.server.URL
-	conf.Server.OIDC.ClientID = "navidrome"
-	conf.Server.OIDC.RedirectURL = "https://music.example/music/auth/oidc/callback"
-	conf.Server.OIDC.MaxSessionDuration = time.Hour
-	ds := &tests.MockDataStore{}
+	conf.Update(func(c *conf.Options) {
+		c.BasePath = "/music"
+		c.SessionTimeout = 24 * time.Hour
+		c.OIDC.Enabled = true
+		c.OIDC.IssuerURL = p.server.URL
+		c.OIDC.ClientID = "navidrome"
+		c.OIDC.RedirectURL = "https://music.example/music/auth/oidc/callback"
+		c.OIDC.MaxSessionDuration = time.Hour
+	})
+	ds := persistence.New(db.Db())
 	auth.Init(ds)
 	user := &model.User{ID: "existing-user", UserName: "alice", Name: "Existing Name", IsAdmin: true, NewPassword: "local-password"}
-	if err := ds.User(context.Background()).Put(user); err != nil {
+	if err := ds.User().Put(t.Context(), user); err != nil {
 		t.Fatal(err)
 	}
 	return newOIDCLogin(ds), p, user
@@ -185,8 +199,9 @@ func TestOIDCLogin(t *testing.T) {
 	if err != nil || claims.UserID != user.ID || !claims.IsAdmin || claims.Subject != "alice" || claims.SessionExpiresAt.IsZero() {
 		t.Fatalf("invalid Navidrome session: %+v, %v", claims, err)
 	}
-	if user.Name != "Existing Name" || user.Password != "local-password" || user.AuthType != "" {
-		t.Fatal("OIDC modified the linked account")
+	stored, err := o.ds.User().FindByUsernameWithPassword(context.Background(), user.UserName)
+	if err != nil || stored.Name != "Existing Name" || stored.Password != "local-password" || stored.AuthType != model.AuthTypeLocal || !stored.IsAdmin {
+		t.Fatalf("OIDC modified the linked account: %+v, %v", stored, err)
 	}
 	if strings.Contains(session.Body.String(), "provider-access-token") {
 		t.Fatal("provider token exposed to browser")
@@ -234,7 +249,9 @@ func TestOIDCRejectsInvalidLogin(t *testing.T) {
 				tx.expires = time.Now().Add(-time.Second)
 				o.pending[cookie.Value] = tx
 			case "database failure":
-				o.ds.(*tests.MockDataStore).MockedUser.(*tests.MockedUserRepo).Error = errors.New("database unavailable")
+				o.ds = persistencetest.Stub(o.ds, persistencetest.Repos{User: func(r model.UserRepository) model.UserRepository {
+					return unavailableUserRepo{r}
+				}})
 			}
 			w := callbackOIDC(o, cookie, state)
 			if w.Header().Get("Location") != "/music/app/#/login?oidc=failed" {
@@ -248,7 +265,10 @@ func TestOIDCHandoffRejectsCredentialChange(t *testing.T) {
 	o, p, user := setupOIDC(t)
 	cookie, state := startOIDC(t, o, p)
 	w := callbackOIDC(o, cookie, state)
-	user.TokenEpoch++
+	// Changing the stored credential epoch revokes every session minted before the change.
+	if _, err := db.Db().Exec("UPDATE user SET token_epoch = token_epoch + 1 WHERE id = ?", user.ID); err != nil {
+		t.Fatal(err)
+	}
 	if got := sessionOIDC(o, w.Result().Cookies()[0], "https://music.example"); got.Code != http.StatusUnauthorized {
 		t.Fatal("session accepted after credentials were changed")
 	}
@@ -262,7 +282,7 @@ func TestOIDCAutomaticallyCreatesUsers(t *testing.T) {
 	if !strings.HasSuffix(w.Header().Get("Location"), "oidc=complete") {
 		t.Fatalf("automatic provisioning failed: %s", w.Header().Get("Location"))
 	}
-	user, err := o.ds.User(context.Background()).FindByUsername("new-listener")
+	user, err := o.ds.User().FindByUsernameWithPassword(context.Background(), "new-listener")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,12 +302,20 @@ func TestOIDCAutomaticallyCreatesUsers(t *testing.T) {
 
 func TestOIDCAutomaticallyMatchesExistingUsernames(t *testing.T) {
 	o, p, existing := setupOIDC(t)
+	// Put replaced NewPassword with its ciphertext: clear it so the stored password is kept.
 	existing.AuthType = model.AuthTypeLDAP
+	existing.NewPassword = ""
+	if err := o.ds.User().Put(context.Background(), existing); err != nil {
+		t.Fatal(err)
+	}
 	user, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "ALICE"})
-	if err != nil || user.ID != existing.ID || user.AuthType != model.AuthTypeLDAP || user.Password != "local-password" || !user.IsAdmin {
+	if err != nil || user.ID != existing.ID || user.AuthType != model.AuthTypeLDAP || !user.IsAdmin {
 		t.Fatalf("existing account was not preserved: %v", err)
 	}
-	count, _ := o.ds.User(context.Background()).CountAll()
+	if stored, err := o.ds.User().FindByUsernameWithPassword(context.Background(), user.UserName); err != nil || stored.Password != "local-password" {
+		t.Fatalf("existing credential was not preserved: %v", err)
+	}
+	count, _ := o.ds.User().CountAll(context.Background())
 	if count != 1 {
 		t.Fatal("created a duplicate instead of matching the existing username")
 	}
@@ -314,7 +342,14 @@ func TestOIDCDeletedAccountsDoNotInheritReplacementPrivileges(t *testing.T) {
 	if _, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "alice"}); err != nil {
 		t.Fatal(err)
 	}
-	existing.ID = "replacement-user"
+	// The original account is deleted and a new account takes over its username.
+	if _, err := db.Db().Exec("DELETE FROM user WHERE id = ?", existing.ID); err != nil {
+		t.Fatal(err)
+	}
+	replacement := &model.User{ID: "replacement-user", UserName: existing.UserName, Name: existing.Name, IsAdmin: true, NewPassword: "local-password"}
+	if err := o.ds.User().Put(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "alice"}); err == nil {
 		t.Fatal("the deleted identity inherited a replacement account")
 	}
@@ -322,8 +357,10 @@ func TestOIDCDeletedAccountsDoNotInheritReplacementPrivileges(t *testing.T) {
 
 func TestOIDCRateLimitDoesNotStrandAcceptedFlow(t *testing.T) {
 	o, p, _ := setupOIDC(t)
-	conf.Server.AuthRequestLimit = 1
-	conf.Server.AuthWindowLength = time.Hour
+	conf.Update(func(c *conf.Options) {
+		c.AuthRequestLimit = 1
+		c.AuthWindowLength = time.Hour
+	})
 	router := chi.NewRouter()
 	o.mount(router)
 	start := httptest.NewRecorder()

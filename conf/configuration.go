@@ -3,7 +3,7 @@ package conf
 import (
 	"cmp"
 	"encoding"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -30,7 +30,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-type configOptions struct {
+type Options struct {
 	ConfigFile                      string `conf:"-"`
 	Address                         string
 	Port                            int
@@ -71,7 +71,7 @@ type configOptions struct {
 	DefaultDownsamplingFormat       string
 	Search                          searchOptions  `json:",omitzero"`
 	Matcher                         matcherOptions `json:",omitzero"`
-	RecentlyAddedByModTime          bool
+	RecentlyAddedBy                 string
 	PreferSortTags                  bool
 	EnableNaturalSorting            bool
 	IgnoredArticles                 string
@@ -102,6 +102,7 @@ type configOptions struct {
 	DefaultUIVolume                 int
 	UISearchDebounceMs              int
 	UICoverArtSize                  int
+	UIAppendRemixers                bool // Whether to show remixers after the track artists in the UI
 	EnableReplayGain                bool
 	EnableCoverAnimation            bool
 	EnableNowPlaying                bool
@@ -145,6 +146,7 @@ type configOptions struct {
 	DevUIShowConfig                   bool
 	DevNewEventStream                 bool
 	DevOffsetOptimize                 int
+	DevMaxPlaylistTracksPerRequest    int
 	DevArtworkMaxRequests             int
 	DevArtworkThrottleBacklogLimit    int
 	DevArtworkThrottleBacklogTimeout  time.Duration
@@ -163,6 +165,8 @@ type configOptions struct {
 	DevExternalArtistFetchMultiplier  float64
 	DevPreserveUnicodeInExternalCalls bool
 	DevEnableMediaFileProbe           bool
+	DevMatchEstimatedContentLength    bool
+	DevAPIv1                          bool
 }
 
 type scannerOptions struct {
@@ -177,6 +181,7 @@ type scannerOptions struct {
 	GroupAlbumReleases    bool     // Deprecated: Use PID.Album instead
 	FollowSymlinks        bool     // Whether to follow symlinks when scanning directories
 	IgnoreDotFolders      bool     // Whether to ignore folders whose name starts with a dot when scanning
+	RespectNoMedia        bool     // Whether to skip folders (and their subfolders) containing a .nomedia file
 	PurgeMissing          string   // Values: "never", "always", "full"
 }
 
@@ -196,56 +201,6 @@ type subsonicOptions struct {
 	MinimalClients        string
 }
 
-type oidcOptions struct {
-	Enabled            bool
-	AutoRedirect       bool
-	DisplayName        string
-	IssuerURL          string
-	ClientID           string
-	ClientSecret       string
-	RedirectURL        string
-	MaxSessionDuration time.Duration
-}
-
-type ldapOptions struct {
-	Host         string
-	BindDN       string
-	BindPassword string
-	Base         string
-	SearchFilter string
-	Mail         string
-	Name         string
-
-	// LivenessSchedule, when non-empty, schedules a background sweep that
-	// reconciles each LDAP-backed user against the directory and revokes
-	// the app passwords of users that no longer match. Accepts any
-	// scheduler spec (a duration like "5m" or a full crontab). Empty
-	// disables the sweep.
-	LivenessSchedule string
-	// DisabledFilter is an optional LDAP filter clause that, when ANDed
-	// with the per-user SearchFilter, identifies disabled directory
-	// entries (e.g. AD's `(userAccountControl:1.2.840.113556.1.4.803:=2)`
-	// or a custom `(loginShell=/sbin/nologin)`). When set, an entry that
-	// still exists but matches this filter is treated the same as one
-	// that has been removed. The filter applies to the user's own
-	// attributes — it is NOT formatted with the username.
-	DisabledFilter string
-
-	// AdminGroup is the DN of an LDAP group whose members should be
-	// granted Navidrome admin. When set, IsAdmin is recomputed against
-	// the directory on every LDAP login and on every liveness sweep —
-	// becoming the single source of truth for admin membership. The
-	// search uses `(&(memberOf=<AdminGroup>)<SearchFilter for user>)`.
-	// Mutually exclusive with AdminFilter (AdminGroup wins if both set).
-	AdminGroup string
-	// AdminFilter is an alternative to AdminGroup for directories that
-	// don't expose `memberOf` or for more complex admin-membership rules.
-	// The filter MUST contain `%s`, which is replaced by the escaped
-	// username, mirroring SearchFilter. Example:
-	// `(&(memberOf=cn=nd-admins,ou=groups,dc=example,dc=org)(uid=%s))`.
-	AdminFilter string
-}
-
 type TagConf struct {
 	Ignore    bool     `yaml:"ignore" json:",omitempty"`
 	Aliases   []string `yaml:"aliases" json:",omitempty"`
@@ -257,10 +212,11 @@ type TagConf struct {
 
 type lastfmOptions struct {
 	Enabled                 bool
-	ApiKey                  string //nolint:gosec
-	Secret                  string //nolint:gosec
+	ApiKey                  string
+	Secret                  string
 	Language                string
 	ScrobbleFirstArtistOnly bool
+	MinScrobbleDuration     time.Duration
 
 	// Computed values
 	Languages []string `conf:"-"` // Computed from Language, split by comma
@@ -287,6 +243,8 @@ type jellyfinOptions struct {
 	// ExposedPublicUsers is a comma-separated list of usernames to advertise on the unauthenticated
 	// GET /Users/Public, so Jellyfin clients can show a login user-picker. Empty exposes no users.
 	ExposedPublicUsers string
+	AutoDiscovery      bool
+	QuickConnect       bool
 	// MaxConcurrentStreams bounds how many collection responses can stream at once. Each holds a DB
 	// cursor — and its pooled connection — for the whole client-paced response, so without a bound
 	// enough slow clients would take the entire pool and stall the scanner, scrobbles and the UI.
@@ -300,7 +258,7 @@ type httpHeaderOptions struct {
 type prometheusOptions struct {
 	Enabled     bool
 	MetricsPath string
-	Password    string //nolint:gosec
+	Password    string
 }
 
 type AudioDeviceDefinition []string
@@ -331,11 +289,12 @@ type inspectOptions struct {
 }
 
 type pluginsOptions struct {
-	Enabled    bool
-	Folder     Dir
-	CacheSize  string
-	AutoReload bool
-	LogLevel   string
+	Enabled         bool
+	Folder          Dir
+	CacheSize       string
+	AutoReload      bool
+	LogLevel        string
+	MaxTaskDuration time.Duration
 }
 
 type extAuthOptions struct {
@@ -369,30 +328,11 @@ var currentGOOS = func() string {
 
 // TLSEnabled reports whether the server serves HTTPS. Both halves are required,
 // so callers cannot infer it from the certificate alone.
-func (c *configOptions) TLSEnabled() bool {
+func (c Options) TLSEnabled() bool {
 	return c.TLSCert != "" && c.TLSKey != ""
 }
 
-var (
-	Server = &configOptions{}
-	hooks  []func()
-)
-
-// SnapshotConfig returns a function that restores Server to its current state.
-// Uses JSON round-tripping so Dir fields get fresh sync.Once values.
-func SnapshotConfig() func() {
-	snapshot, err := json.Marshal(Server)
-	if err != nil {
-		panic(fmt.Sprintf("SnapshotConfig: marshal failed: %v", err))
-	}
-	return func() {
-		var restored configOptions
-		if err := json.Unmarshal(snapshot, &restored); err != nil {
-			panic(fmt.Sprintf("SnapshotConfig: unmarshal failed: %v", err))
-		}
-		Server = &restored
-	}
-}
+var hooks []func()
 
 func LoadFromFile(confFile string) {
 	viper.SetConfigFile(confFile)
@@ -420,8 +360,10 @@ func Load(noConfigDump bool) {
 			mapDeprecatedOption(o.name, o.replacement)
 		}
 	}
+	mapRecentlyAddedByModTime()
 
-	err := viper.Unmarshal(&Server, viper.DecodeHook(
+	s := clone(current.Load())
+	err := viper.Unmarshal(s, viper.DecodeHook(
 		mapstructure.ComposeDecodeHookFunc(
 			mapstructure.TextUnmarshallerHookFunc(),
 			mapstructure.StringToTimeDurationHookFunc(),
@@ -433,35 +375,35 @@ func Load(noConfigDump bool) {
 	}
 
 	// Validate non-root user early, before any filesystem operations
-	if err := validateEnforceNonRootUser(); err != nil {
+	if err := s.validateEnforceNonRootUser(); err != nil {
 		logFatal(err)
 	}
 
-	if Server.CacheFolder.String() == "" {
-		Server.CacheFolder = NewDir(filepath.Join(Server.DataFolder.String(), "cache"))
+	if s.CacheFolder.String() == "" {
+		s.CacheFolder = NewDir(filepath.Join(s.DataFolder.String(), "cache"))
 	}
 
-	if Server.Plugins.Enabled {
-		if Server.Plugins.Folder.String() == "" {
-			Server.Plugins.Folder = NewDirWithPerm(filepath.Join(Server.DataFolder.String(), "plugins"), 0700)
+	if s.Plugins.Enabled {
+		if s.Plugins.Folder.String() == "" {
+			s.Plugins.Folder = NewDirWithPerm(filepath.Join(s.DataFolder.String(), "plugins"), 0700)
 		} else {
-			Server.Plugins.Folder = NewDirWithPerm(Server.Plugins.Folder.String(), 0700)
+			s.Plugins.Folder = NewDirWithPerm(s.Plugins.Folder.String(), 0700)
 		}
 	}
 
-	Server.ConfigFile = viper.GetViper().ConfigFileUsed()
-	if Server.DbPath == "" {
-		Server.DbPath = filepath.Join(Server.DataFolder.String(), consts.DefaultDbPath)
+	s.ConfigFile = viper.GetViper().ConfigFileUsed()
+	if s.DbPath == "" {
+		s.DbPath = filepath.Join(s.DataFolder.String(), consts.DefaultDbPath)
 	}
 
 	out := os.Stderr
-	if Server.LogFile != "" {
-		if mkErr := os.MkdirAll(filepath.Dir(Server.LogFile), os.ModePerm); mkErr != nil {
-			logFatal(fmt.Sprintf("Error creating log file directory: %s", mkErr.Error()))
+	if s.LogFile != "" {
+		if mkErr := os.MkdirAll(filepath.Dir(s.LogFile), os.ModePerm); mkErr != nil {
+			logFatal("Error creating log file directory: " + mkErr.Error())
 		}
-		out, err = os.OpenFile(Server.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		out, err = os.OpenFile(s.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
-			logFatal(fmt.Sprintf("Error opening log file %s: %s", Server.LogFile, err.Error()))
+			logFatal(fmt.Sprintf("Error opening log file %s: %s", s.LogFile, err.Error()))
 		}
 		log.SetOutput(out)
 	} else if os.Getenv("ND_SYSTEMD_PRIORITY_LOGGING") != "" && os.Getenv("JOURNAL_STREAM") != "" {
@@ -472,24 +414,26 @@ func Load(noConfigDump bool) {
 		log.EnableJournalFormat()
 	}
 
-	log.SetLevelString(Server.LogLevel)
-	log.SetLogLevels(Server.DevLogLevels)
-	log.SetLogSourceLine(Server.DevLogSourceLine)
-	log.SetRedacting(Server.EnableLogRedacting)
+	log.SetLevelString(s.LogLevel)
+	log.SetLogLevels(s.DevLogLevels)
+	log.SetLogSourceLine(s.DevLogSourceLine)
+	log.SetRedacting(s.EnableLogRedacting)
 
-	durationNonNegativeOrDefault(&Server.SessionTimeout, consts.DefaultSessionTimeout)
-	durationNonNegativeOrDefault(&Server.SmartPlaylistRefreshDelay, consts.DefaultSmartRefresh)
-	durationNonNegativeOrDefault(&Server.DefaultShareExpiration, consts.DefaultShareExpiration)
-	durationNonNegativeOrDefault(&Server.UIPlaybackReportInterval, consts.DefaultUIPlaybackReportInterval)
-	durationNonNegativeOrDefault(&Server.AuthWindowLength, consts.DefaultAuthWindowLength)
-	durationNonNegativeOrDefault(&Server.Scanner.WatcherWait, consts.DefaultWatcherWait)
+	durationNonNegativeOrDefault(&s.SessionTimeout, consts.DefaultSessionTimeout)
+	durationNonNegativeOrDefault(&s.SmartPlaylistRefreshDelay, consts.DefaultSmartRefresh)
+	durationNonNegativeOrDefault(&s.DefaultShareExpiration, consts.DefaultShareExpiration)
+	durationNonNegativeOrDefault(&s.UIPlaybackReportInterval, consts.DefaultUIPlaybackReportInterval)
+	durationNonNegativeOrDefault(&s.AuthWindowLength, consts.DefaultAuthWindowLength)
+	durationNonNegativeOrDefault(&s.Scanner.WatcherWait, consts.DefaultWatcherWait)
 
-	durationNonNegativeOrDefault(&Server.DevActivityPanelUpdateRate, consts.DefaultActivityPanelUpdateRate)
-	durationNonNegativeOrDefault(&Server.DevArtworkThrottleBacklogTimeout, consts.RequestThrottleBacklogTimeout)
-	durationNonNegativeOrDefault(&Server.DevArtistInfoTimeToLive, consts.ArtistInfoTimeToLive)
-	durationNonNegativeOrDefault(&Server.DevAlbumInfoTimeToLive, consts.AlbumInfoTimeToLive)
-	durationNonNegativeOrDefault(&Server.DevInsightsInitialDelay, consts.InsightsInitialDelay)
-	durationNonNegativeOrDefault(&Server.DevPluginCompilationTimeout, consts.DefaultPluginCompilationTimeout)
+	durationNonNegativeOrDefault(&s.DevActivityPanelUpdateRate, consts.DefaultActivityPanelUpdateRate)
+	durationNonNegativeOrDefault(&s.DevArtworkThrottleBacklogTimeout, consts.RequestThrottleBacklogTimeout)
+	durationNonNegativeOrDefault(&s.DevArtistInfoTimeToLive, consts.ArtistInfoTimeToLive)
+	durationNonNegativeOrDefault(&s.DevAlbumInfoTimeToLive, consts.AlbumInfoTimeToLive)
+	durationNonNegativeOrDefault(&s.DevInsightsInitialDelay, consts.InsightsInitialDelay)
+	durationNonNegativeOrDefault(&s.DevPluginCompilationTimeout, consts.DefaultPluginCompilationTimeout)
+
+	durationNonNegativeOrDefault(&s.LastFM.MinScrobbleDuration, consts.DefaultMinScrobbleDuration)
 
 	// Log deprecated, removed and unknown options
 	for _, o := range deprecatedOptions {
@@ -499,38 +443,41 @@ func Load(noConfigDump bool) {
 	logUnknownOptions()
 
 	err = run.Sequentially(
-		validateScanSchedule,
-		validateBackupSchedule,
-		validateLDAPLivenessSchedule,
-		validateLDAPAdminFilter,
-		validateOIDC,
-		validatePlaylistsPath,
-		validatePurgeMissingOption,
-		validateByteSize("MaxImageUploadSize", Server.MaxImageUploadSize),
-		validateByteSize("MaxImageSize", Server.MaxImageSize),
-		validateURL("ExtAuth.LogoutURL", Server.ExtAuth.LogoutURL),
+		s.validateScanSchedule,
+		s.validateBackupSchedule,
+		s.validateLDAPLivenessSchedule,
+		s.validateLDAPAdminFilter,
+		s.validateOIDC,
+		s.validatePlaylistsPath,
+		validateEnum("Scanner.PurgeMissing", &s.Scanner.PurgeMissing,
+			consts.PurgeMissingNever, consts.PurgeMissingAlways, consts.PurgeMissingFull),
+		validateEnum("RecentlyAddedBy", &s.RecentlyAddedBy,
+			consts.RecentlyAddedByScan, consts.RecentlyAddedByBirth, consts.RecentlyAddedByModTime),
+		validateByteSize("MaxImageUploadSize", s.MaxImageUploadSize),
+		validateByteSize("MaxImageSize", s.MaxImageSize),
+		validateURL("ExtAuth.LogoutURL", s.ExtAuth.LogoutURL),
 	)
 	if err != nil {
 		logFatal(err)
 	}
 
-	Server.Search.Backend = normalizeSearchBackend(Server.Search.Backend)
+	s.Search.Backend = normalizeSearchBackend(s.Search.Backend)
 
-	if Server.BaseURL != "" {
-		u, err := url.Parse(Server.BaseURL)
+	if s.BaseURL != "" {
+		u, err := url.Parse(s.BaseURL)
 		if err != nil {
 			logFatal("Invalid BaseURL:", err)
 		}
-		Server.BasePath = u.Path
+		s.BasePath = u.Path
 		u.Path = ""
 		u.RawQuery = ""
-		Server.BaseHost = u.Host
-		Server.BaseScheme = u.Scheme
+		s.BaseHost = u.Host
+		s.BaseScheme = u.Scheme
 	}
 
 	// Log configuration source
-	if Server.ConfigFile != "" {
-		log.Info("Loaded configuration", "file", Server.ConfigFile)
+	if s.ConfigFile != "" {
+		log.Info("Loaded configuration", "file", s.ConfigFile)
 	} else if hasNDEnvVars() {
 		log.Info("No configuration file found. Loaded configuration only from environment variables")
 	} else {
@@ -539,41 +486,48 @@ func Load(noConfigDump bool) {
 
 	// Print current configuration if log level is Debug
 	if log.IsGreaterOrEqualTo(log.LevelDebug) && !noConfigDump {
-		prettyConf := pretty.Sprintf("Configuration: %# v", Server)
-		if Server.EnableLogRedacting {
+		prettyConf := pretty.Sprintf("Configuration: %# v", s)
+		if s.EnableLogRedacting {
 			prettyConf = log.Redact(prettyConf)
 		}
 		_, _ = fmt.Fprintln(out, prettyConf)
 	}
 
-	if !Server.EnableExternalServices {
-		disableExternalServices()
+	if !s.EnableExternalServices {
+		s.disableExternalServices()
 	}
 
 	// Make sure we don't have empty PIDs
-	Server.PID.Album = cmp.Or(Server.PID.Album, consts.DefaultAlbumPID)
-	Server.PID.Track = cmp.Or(Server.PID.Track, consts.DefaultTrackPID)
+	s.PID.Album = cmp.Or(s.PID.Album, consts.DefaultAlbumPID)
+	s.PID.Track = cmp.Or(s.PID.Track, consts.DefaultTrackPID)
 
 	// Parse LastFM.Language into Languages slice (comma-separated, with fallback to DefaultInfoLanguage)
-	Server.LastFM.Languages = parseLanguages(Server.LastFM.Language)
+	s.LastFM.Languages = parseLanguages(s.LastFM.Language)
 
 	// Parse Deezer.Language into Languages slice (comma-separated, with fallback to DefaultInfoLanguage)
-	Server.Deezer.Languages = parseLanguages(Server.Deezer.Language)
+	s.Deezer.Languages = parseLanguages(s.Deezer.Language)
 
 	// Validate other options
-	if Server.UICoverArtSize < 200 || Server.UICoverArtSize > 1200 {
-		newValue := max(200, min(1200, Server.UICoverArtSize))
-		log.Warn("UICoverArtSize must be between 200 and 1200, clamping", "value", Server.UICoverArtSize, "newValue", newValue)
-		Server.UICoverArtSize = newValue
+	if s.UICoverArtSize < 200 || s.UICoverArtSize > 1200 {
+		newValue := max(200, min(1200, s.UICoverArtSize))
+		log.Warn("UICoverArtSize must be between 200 and 1200, clamping", "value", s.UICoverArtSize, "newValue", newValue)
+		s.UICoverArtSize = newValue
+	}
+
+	if s.Scanner.Extractor != consts.DefaultScannerExtractor {
+		log.Warn("Invalid Scanner.Extractor, using default", "value", s.Scanner.Extractor, "default", consts.DefaultScannerExtractor)
+		s.Scanner.Extractor = consts.DefaultScannerExtractor
 	}
 
 	// Floor MaxImageSize at MaxImageUploadSize so accepted uploads can always be read back.
-	imgSize, _ := humanize.ParseBytes(Server.MaxImageSize)
-	uploadSize, _ := humanize.ParseBytes(Server.MaxImageUploadSize)
+	imgSize, _ := humanize.ParseBytes(s.MaxImageSize)
+	uploadSize, _ := humanize.ParseBytes(s.MaxImageUploadSize)
 	if imgSize < uploadSize {
-		log.Warn("MaxImageSize must be at least MaxImageUploadSize, raising", "value", Server.MaxImageSize, "newValue", Server.MaxImageUploadSize)
-		Server.MaxImageSize = Server.MaxImageUploadSize
+		log.Warn("MaxImageSize must be at least MaxImageUploadSize, raising", "value", s.MaxImageSize, "newValue", s.MaxImageUploadSize)
+		s.MaxImageSize = s.MaxImageUploadSize
 	}
+
+	current.Store(s)
 
 	// Call init hooks
 	for _, hook := range hooks {
@@ -594,6 +548,7 @@ var deprecatedOptions = []struct{ name, replacement string }{
 	{"CoverJpegQuality", "CoverArtQuality"},
 	{"SimilarSongsMatchThreshold", "Matcher.FuzzyThreshold"},
 	{"EnableTranscodingCancellation", "Transcoding.EnableCancellation"},
+	{"RecentlyAddedByModTime", "RecentlyAddedBy"},
 }
 
 var removedOptions = []string{"Spotify.ID", "Spotify.Secret"}
@@ -671,6 +626,18 @@ func mapDeprecatedOption(legacyName, newName string) {
 	// viper.Set outranks the config file, so an explicit replacement must win over the legacy value
 	if viper.IsSet(legacyName) && !explicitlySet(newName) {
 		viper.Set(newName, viper.Get(legacyName))
+	}
+}
+
+// mapRecentlyAddedByModTime overrides the generic mapping, which would copy the legacy boolean as-is.
+func mapRecentlyAddedByModTime() {
+	if !viper.IsSet("RecentlyAddedByModTime") || explicitlySet("RecentlyAddedBy") {
+		return
+	}
+	if viper.GetBool("RecentlyAddedByModTime") {
+		viper.Set("RecentlyAddedBy", consts.RecentlyAddedByModTime)
+	} else {
+		viper.Set("RecentlyAddedBy", consts.RecentlyAddedByScan)
 	}
 }
 
@@ -787,7 +754,7 @@ func asWrittenInConfigFile(keys []string) []string {
 	})
 }
 
-// Matches keys and section headers in all supported config formats.
+// configFileKeyRx matches keys and section headers in all supported config formats.
 var configFileKeyRx = regexp.MustCompile(`(?m)^\s*\[?\s*"?([\w.]+)"?\s*[]=:]`)
 
 // configKeys maps every accepted option name, lowercased, to its canonical spelling,
@@ -815,7 +782,7 @@ var configKeys = sync.OnceValues(func() (map[string]string, []string) {
 			}
 		}
 	}
-	collect(reflect.TypeFor[configOptions](), "")
+	collect(reflect.TypeFor[Options](), "")
 
 	for _, o := range deprecatedOptions {
 		keys[strings.ToLower(o.name)] = o.name
@@ -850,21 +817,21 @@ func parseIniFileConfiguration() {
 	}
 }
 
-func disableExternalServices() {
+func (s *Options) disableExternalServices() {
 	log.Info("All external integrations are DISABLED!")
-	Server.EnableInsightsCollector = false
-	Server.EnableM3UExternalAlbumArt = false
-	Server.LastFM.Enabled = false
-	Server.Deezer.Enabled = false
-	Server.ListenBrainz.Enabled = false
-	Server.Agents = ""
-	if Server.UILoginBackgroundURL == consts.DefaultUILoginBackgroundURL {
-		Server.UILoginBackgroundURL = consts.DefaultUILoginBackgroundURLOffline
+	s.EnableInsightsCollector = false
+	s.EnableM3UExternalAlbumArt = false
+	s.LastFM.Enabled = false
+	s.Deezer.Enabled = false
+	s.ListenBrainz.Enabled = false
+	s.Agents = ""
+	if s.UILoginBackgroundURL == consts.DefaultUILoginBackgroundURL {
+		s.UILoginBackgroundURL = consts.DefaultUILoginBackgroundURLOffline
 	}
 }
 
-func validatePlaylistsPath() error {
-	for path := range strings.SplitSeq(Server.PlaylistsPath, string(filepath.ListSeparator)) {
+func (s *Options) validatePlaylistsPath() error {
+	for path := range strings.SplitSeq(s.PlaylistsPath, string(filepath.ListSeparator)) {
 		_, err := doublestar.Match(path, "")
 		if err != nil {
 			return fmt.Errorf("invalid PlaylistsPath %q: %w", path, err)
@@ -889,15 +856,16 @@ func parseLanguages(lang string) []string {
 	return languages
 }
 
-func validatePurgeMissingOption() error {
-	allowedValues := []string{consts.PurgeMissingNever, consts.PurgeMissingAlways, consts.PurgeMissingFull}
-	valid := slices.Contains(allowedValues, Server.Scanner.PurgeMissing)
-	if !valid {
-		err := fmt.Errorf("invalid Scanner.PurgeMissing value: '%s'. Must be one of: %v", Server.Scanner.PurgeMissing, allowedValues)
-		Server.Scanner.PurgeMissing = consts.PurgeMissingNever
+// validateEnum resets value to its first allowed entry when it is not one of them.
+func validateEnum(name string, value *string, allowed ...string) func() error {
+	return func() error {
+		if slices.Contains(allowed, *value) {
+			return nil
+		}
+		err := fmt.Errorf("invalid %s value: '%s'. Must be one of: %v", name, *value, allowed)
+		*value = allowed[0]
 		return err
 	}
-	return nil
 }
 
 func validateByteSize(name, value string) func() error {
@@ -916,58 +884,35 @@ func validateByteSize(name, value string) func() error {
 	}
 }
 
-func validateEnforceNonRootUser() error {
-	if !Server.EnforceNonRootUser || currentGOOS() == "windows" {
+func (s *Options) validateEnforceNonRootUser() error {
+	if !s.EnforceNonRootUser || currentGOOS() == "windows" {
 		return nil
 	}
 
 	if getEUID() == 0 {
-		return fmt.Errorf("EnforceNonRootUser is enabled but Navidrome is running as root")
+		return errors.New("EnforceNonRootUser is enabled but Navidrome is running as root")
 	}
 
 	return nil
 }
 
-func validateScanSchedule() error {
-	if Server.Scanner.Schedule == "0" || Server.Scanner.Schedule == "" {
-		Server.Scanner.Schedule = ""
+func (s *Options) validateScanSchedule() error {
+	if s.Scanner.Schedule == "0" || s.Scanner.Schedule == "" {
+		s.Scanner.Schedule = ""
 		return nil
 	}
 	var err error
-	Server.Scanner.Schedule, err = validateSchedule(Server.Scanner.Schedule, "Scanner.Schedule")
+	s.Scanner.Schedule, err = validateSchedule(s.Scanner.Schedule, "Scanner.Schedule")
 	return err
 }
 
-func validateLDAPLivenessSchedule() error {
-	if Server.LDAP.LivenessSchedule == "0" || Server.LDAP.LivenessSchedule == "" {
-		Server.LDAP.LivenessSchedule = ""
+func (s *Options) validateBackupSchedule() error {
+	if s.Backup.Path.String() == "" || s.Backup.Schedule == "" || s.Backup.Count == 0 {
+		s.Backup.Schedule = ""
 		return nil
 	}
 	var err error
-	Server.LDAP.LivenessSchedule, err = validateSchedule(Server.LDAP.LivenessSchedule, "LDAP.LivenessSchedule")
-	return err
-}
-
-// validateLDAPAdminFilter refuses to start when LDAP.AdminFilter is
-// configured but missing the `%s` placeholder. Without it, fmt.Sprintf
-// silently produces a malformed filter (e.g.
-// `(memberOf=cn=admins,...)%!(EXTRA string=alice)`) which only surfaces
-// at runtime as repeated "LDAP admin lookup failed" warnings — the kind
-// of silent breakage that's better caught at startup.
-func validateLDAPAdminFilter() error {
-	if af := Server.LDAP.AdminFilter; af != "" && !strings.Contains(af, "%s") {
-		return fmt.Errorf("ND_LDAP_ADMINFILTER must contain %%s placeholder for the username")
-	}
-	return nil
-}
-
-func validateBackupSchedule() error {
-	if Server.Backup.Path.String() == "" || Server.Backup.Schedule == "" || Server.Backup.Count == 0 {
-		Server.Backup.Schedule = ""
-		return nil
-	}
-	var err error
-	Server.Backup.Schedule, err = validateSchedule(Server.Backup.Schedule, "Backup.Schedule")
+	s.Backup.Schedule, err = validateSchedule(s.Backup.Schedule, "Backup.Schedule")
 	return err
 }
 
@@ -1042,14 +987,8 @@ func hasNDEnvVars() bool {
 }
 
 func setViperDefaults() {
-	viper.SetDefault("oidc.enabled", false)
-	viper.SetDefault("oidc.autoredirect", false)
-	viper.SetDefault("oidc.displayname", "PocketID")
-	viper.SetDefault("oidc.issuerurl", "")
-	viper.SetDefault("oidc.clientid", "")
-	viper.SetDefault("oidc.clientsecret", "")
-	viper.SetDefault("oidc.redirecturl", "")
-	viper.SetDefault("oidc.maxsessionduration", 12*time.Hour)
+	ldapDefaults()
+	oidcDefaults()
 	viper.SetDefault("musicfolder", filepath.Join(".", "music"))
 	viper.SetDefault("cachefolder", "")
 	viper.SetDefault("datafolder", ".")
@@ -1085,7 +1024,7 @@ func setViperDefaults() {
 	viper.SetDefault("search.backend", "fts")
 	viper.SetDefault("matcher.preferstarred", true)
 	viper.SetDefault("matcher.fuzzythreshold", 85)
-	viper.SetDefault("recentlyaddedbymodtime", false)
+	viper.SetDefault("recentlyaddedby", consts.RecentlyAddedByScan)
 	viper.SetDefault("prefersorttags", false)
 	viper.SetDefault("enablenaturalsorting", false)
 	viper.SetDefault("ignoredarticles", "The El La Los Las Le Les Os As O A")
@@ -1109,6 +1048,7 @@ func setViperDefaults() {
 	viper.SetDefault("defaultuivolume", consts.DefaultUIVolume)
 	viper.SetDefault("uisearchdebouncems", consts.DefaultUISearchDebounceMs)
 	viper.SetDefault("uicoverartsize", consts.DefaultUICoverArtSize)
+	viper.SetDefault("uiappendremixers", true)
 	viper.SetDefault("enablereplaygain", true)
 	viper.SetDefault("enablecoveranimation", true)
 	viper.SetDefault("enablenowplaying", true)
@@ -1148,6 +1088,7 @@ func setViperDefaults() {
 	viper.SetDefault("scanner.groupalbumreleases", false)
 	viper.SetDefault("scanner.followsymlinks", true)
 	viper.SetDefault("scanner.ignoredotfolders", true)
+	viper.SetDefault("scanner.respectnomedia", false)
 	viper.SetDefault("scanner.purgemissing", consts.PurgeMissingNever)
 	viper.SetDefault("subsonic.appendsubtitle", true)
 	viper.SetDefault("subsonic.appendalbumversion", true)
@@ -1165,6 +1106,7 @@ func setViperDefaults() {
 	viper.SetDefault("lastfm.apikey", "")
 	viper.SetDefault("lastfm.secret", "")
 	viper.SetDefault("lastfm.scrobblefirstartistonly", false)
+	viper.SetDefault("lastfm.minscrobbleduration", consts.DefaultMinScrobbleDuration)
 	viper.SetDefault("deezer.enabled", true)
 	viper.SetDefault("deezer.language", consts.DefaultInfoLanguage)
 	viper.SetDefault("listenbrainz.enabled", true)
@@ -1173,13 +1115,8 @@ func setViperDefaults() {
 	viper.SetDefault("listenbrainz.trackalgorithm", consts.DefaultListenBrainzTrackAlgorithm)
 	viper.SetDefault("jellyfin.enabled", false)
 	viper.SetDefault("jellyfin.servername", "")
-	viper.SetDefault("ldap.host", "")
-	viper.SetDefault("ldap.binddn", "")
-	viper.SetDefault("ldap.bindpassword", "")
-	viper.SetDefault("ldap.base", "")
-	viper.SetDefault("ldap.searchfilter", "(&(objectClass=inetOrgPerson)(uid=%s))")
-	viper.SetDefault("ldap.mail", "mail")
-	viper.SetDefault("ldap.name", "cn")
+	viper.SetDefault("jellyfin.autodiscovery", false)
+	viper.SetDefault("jellyfin.quickconnect", true)
 	viper.SetDefault("enablescrobblehistory", true)
 	viper.SetDefault("httpheaders.frameoptions", "DENY")
 	viper.SetDefault("backup.path", "")
@@ -1196,6 +1133,7 @@ func setViperDefaults() {
 	viper.SetDefault("plugins.cachesize", "200MB")
 	viper.SetDefault("plugins.autoreload", false)
 	viper.SetDefault("plugins.loglevel", "")
+	viper.SetDefault("plugins.maxtaskduration", time.Hour)
 
 	// DevFlags. These are used to enable/disable debugging and incomplete features
 	viper.SetDefault("devlogsourceline", false)
@@ -1208,7 +1146,9 @@ func setViperDefaults() {
 	viper.SetDefault("devshowartistpage", true)
 	viper.SetDefault("devuishowconfig", true)
 	viper.SetDefault("devneweventstream", true)
+	viper.SetDefault("devapiv1", false)
 	viper.SetDefault("devoffsetoptimize", 50000)
+	viper.SetDefault("devmaxplaylisttracksperrequest", 50000)
 	// Half the pool: streams may take up to this many connections, leaving the rest for the scanner,
 	// scrobbles and the UI. See MaxOpenConns.
 	viper.SetDefault("jellyfin.maxconcurrentstreams", max(2, MaxOpenConns()/2))
@@ -1234,6 +1174,7 @@ func setViperDefaults() {
 	viper.SetDefault("devexternalartistfetchmultiplier", 1.5)
 	viper.SetDefault("devpreserveunicodeinexternalcalls", false)
 	viper.SetDefault("devenablemediafileprobe", true)
+	viper.SetDefault("devmatchestimatedcontentlength", true)
 }
 
 func init() {

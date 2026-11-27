@@ -9,37 +9,36 @@ import (
 	"strings"
 
 	"github.com/navidrome/navidrome/conf"
-	"github.com/navidrome/navidrome/conf/configtest"
 	"github.com/navidrome/navidrome/core/auth"
+	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/persistence"
 	"github.com/navidrome/navidrome/server"
-	"github.com/navidrome/navidrome/tests"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("App Password API", func() {
+	var ctx context.Context
 	var ds model.DataStore
 	var router http.Handler
 	var adminUser, ownerUser, otherUser model.User
 
 	BeforeEach(func() {
-		DeferCleanup(configtest.SetupConfig())
-		// Sharing now defaults to on upstream, but its route setup dereferences
-		// the (nil) share service this test does not exercise.
-		conf.Server.EnableSharing = false
-		ds = &tests.MockDataStore{}
+		ctx = GinkgoT().Context()
+		// Sharing defaults to on, and its route setup needs a share service this test does not provide.
+		conf.Update(func(c *conf.Options) { c.EnableSharing = false })
+		ds = persistence.New(db.Db())
 		auth.Init(ds)
-		nativeRouter := New(ds, nil, nil, nil, tests.NewMockLibraryService(), tests.NewMockUserService(), nil, nil, nil, nil)
-		router = server.JWTVerifier(nativeRouter)
+		router = server.JWTVerifier(newTestRouter(ds, nil, nil, nil))
 
 		adminUser = model.User{ID: "admin-1", UserName: "admin", Name: "Admin", IsAdmin: true, NewPassword: "p"}
 		ownerUser = model.User{ID: "user-1", UserName: "owner", Name: "Owner", IsAdmin: false, NewPassword: "p"}
 		otherUser = model.User{ID: "user-2", UserName: "other", Name: "Other", IsAdmin: false, NewPassword: "p"}
 
-		Expect(ds.User(context.TODO()).Put(&adminUser)).To(Succeed())
-		Expect(ds.User(context.TODO()).Put(&ownerUser)).To(Succeed())
-		Expect(ds.User(context.TODO()).Put(&otherUser)).To(Succeed())
+		Expect(ds.User().Put(ctx, &adminUser)).To(Succeed())
+		Expect(ds.User().Put(ctx, &ownerUser)).To(Succeed())
+		Expect(ds.User().Put(ctx, &otherUser)).To(Succeed())
 	})
 
 	tokenFor := func(u *model.User) string {
@@ -108,7 +107,7 @@ var _ = Describe("App Password API", func() {
 
 	Describe("GET /api/user/{id}/app-password", func() {
 		It("returns the user's own list", func() {
-			Expect(ds.AppPassword(context.TODO()).Put(&model.AppPassword{
+			Expect(ds.AppPassword().Put(ctx, &model.AppPassword{
 				UserID: "user-1", Name: "list-me", NewPassword: "secret",
 			})).To(Succeed())
 
@@ -145,7 +144,7 @@ var _ = Describe("App Password API", func() {
 	Describe("DELETE /api/user/{id}/app-password/{appId}", func() {
 		It("revokes the password when called by the owner", func() {
 			ap := &model.AppPassword{UserID: "user-1", Name: "to-revoke", NewPassword: "x"}
-			Expect(ds.AppPassword(context.TODO()).Put(ap)).To(Succeed())
+			Expect(ds.AppPassword().Put(ctx, ap)).To(Succeed())
 
 			req := createAuthenticatedRequest("DELETE", "/user/user-1/app-password/"+ap.ID, nil, tokenFor(&ownerUser))
 			w := httptest.NewRecorder()
@@ -154,14 +153,14 @@ var _ = Describe("App Password API", func() {
 
 			Expect(w.Code).To(Equal(http.StatusOK))
 
-			active, err := ds.AppPassword(context.TODO()).FindActiveByUser("user-1")
+			active, err := ds.AppPassword().FindActiveByUser(ctx, "user-1")
 			Expect(err).ToNot(HaveOccurred())
 			Expect(active).To(BeEmpty())
 		})
 
 		It("rejects a path mismatch where the password belongs to a different user", func() {
 			ap := &model.AppPassword{UserID: "user-2", Name: "their-pw", NewPassword: "x"}
-			Expect(ds.AppPassword(context.TODO()).Put(ap)).To(Succeed())
+			Expect(ds.AppPassword().Put(ctx, ap)).To(Succeed())
 
 			// Admin tries to revoke user-2's password via a /user/user-1/... path.
 			// This should 404 because the password isn't owned by user-1.
@@ -172,7 +171,7 @@ var _ = Describe("App Password API", func() {
 
 			Expect(w.Code).To(Equal(http.StatusNotFound))
 
-			active, err := ds.AppPassword(context.TODO()).FindActiveByUser("user-2")
+			active, err := ds.AppPassword().FindActiveByUser(ctx, "user-2")
 			Expect(err).ToNot(HaveOccurred())
 			Expect(active).To(HaveLen(1))
 		})
@@ -189,8 +188,8 @@ var _ = Describe("App Password API", func() {
 
 	Describe("DELETE /api/user/{id}/app-password (revoke all)", func() {
 		It("revokes every active password for the user", func() {
-			Expect(ds.AppPassword(context.TODO()).Put(&model.AppPassword{UserID: "user-1", Name: "a", NewPassword: "x"})).To(Succeed())
-			Expect(ds.AppPassword(context.TODO()).Put(&model.AppPassword{UserID: "user-1", Name: "b", NewPassword: "y"})).To(Succeed())
+			Expect(ds.AppPassword().Put(ctx, &model.AppPassword{UserID: "user-1", Name: "a", NewPassword: "x"})).To(Succeed())
+			Expect(ds.AppPassword().Put(ctx, &model.AppPassword{UserID: "user-1", Name: "b", NewPassword: "y"})).To(Succeed())
 
 			req := createAuthenticatedRequest("DELETE", "/user/user-1/app-password", nil, tokenFor(&ownerUser))
 			w := httptest.NewRecorder()
@@ -200,7 +199,7 @@ var _ = Describe("App Password API", func() {
 			Expect(w.Code).To(Equal(http.StatusOK))
 			Expect(w.Body.String()).To(ContainSubstring(`"revoked":2`))
 
-			active, err := ds.AppPassword(context.TODO()).FindActiveByUser("user-1")
+			active, err := ds.AppPassword().FindActiveByUser(ctx, "user-1")
 			Expect(err).ToNot(HaveOccurred())
 			Expect(active).To(BeEmpty())
 		})
@@ -209,7 +208,7 @@ var _ = Describe("App Password API", func() {
 	Describe("response shape", func() {
 		It("never leaks the encrypted password blob via list", func() {
 			ap := &model.AppPassword{UserID: "user-1", Name: "blobby", NewPassword: "the-secret-value"}
-			Expect(ds.AppPassword(context.TODO()).Put(ap)).To(Succeed())
+			Expect(ds.AppPassword().Put(ctx, ap)).To(Succeed())
 
 			req := createAuthenticatedRequest("GET", "/user/user-1/app-password", nil, tokenFor(&adminUser))
 			w := httptest.NewRecorder()

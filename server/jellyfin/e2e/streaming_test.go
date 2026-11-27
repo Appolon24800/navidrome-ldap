@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -45,6 +46,19 @@ var _ = Describe("Streaming", func() {
 		It("returns 404 for an unknown track", func() {
 			Expect(get("/Audio/" + enc(testID("nope")) + "/stream").Code).To(Equal(http.StatusNotFound))
 		})
+
+		DescribeTable("answers HEAD (Fintunes probes the type before playing or downloading)",
+			func(path string) {
+				w := jReq(adminUser, "HEAD", fmt.Sprintf(path, enc(songID("Help!"))), "")
+				Expect(w.Code).To(Equal(http.StatusOK))
+				Expect(w.Header().Get("Content-Type")).ToNot(BeEmpty())
+			},
+			Entry("stream", "/Audio/%s/stream"),
+			Entry("stream.{container}", "/Audio/%s/stream.mp3"),
+			Entry("universal", "/Audio/%s/universal"),
+			Entry("File", "/Items/%s/File"),
+			Entry("Download", "/Items/%s/Download"),
+		)
 	})
 
 	Describe("GET /Audio/{id}/main.m3u8 (Finamp transcoding mode)", func() {
@@ -59,7 +73,7 @@ var _ = Describe("Streaming", func() {
 
 			// Fetch the advertised segment like an HLS player would.
 			var segment string
-			for _, line := range strings.Split(body, "\n") {
+			for line := range strings.SplitSeq(body, "\n") {
 				if line != "" && !strings.HasPrefix(line, "#") {
 					segment = line
 				}

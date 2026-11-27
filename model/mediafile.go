@@ -2,6 +2,8 @@ package model
 
 import (
 	"cmp"
+	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/deluan/rest"
 	"github.com/gohugoio/hashstructure"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
@@ -102,18 +105,19 @@ type MediaFile struct {
 	BirthTime time.Time `structs:"birth_time" json:"birthTime" hash:"ignore"` // Time of file creation (ctime)
 	CreatedAt time.Time `structs:"created_at" json:"createdAt" hash:"ignore"` // Time this entry was created in the DB
 	UpdatedAt time.Time `structs:"updated_at" json:"updatedAt" hash:"ignore"` // Time of file last update (mtime)
+	AddedAt   time.Time `structs:"-" json:"addedAt,omitzero" hash:"ignore"`   // RecentlyAddedAt(), filled on DB reads
 }
 
 func (mf MediaFile) FullTitle() string {
-	if conf.Server.Subsonic.AppendSubtitle && len(mf.Tags[TagSubtitle]) > 0 {
-		return appendSuffix(mf.Title, mf.Tags[TagSubtitle][0])
+	if s := mf.Tags.First(TagSubtitle); conf.Server().Subsonic.AppendSubtitle && s != "" {
+		return appendSuffix(mf.Title, s)
 	}
 	return mf.Title
 }
 
 func (mf MediaFile) FullAlbumName() string {
-	if conf.Server.Subsonic.AppendAlbumVersion && len(mf.Tags[TagAlbumVersion]) > 0 {
-		return appendSuffix(mf.Album, mf.Tags[TagAlbumVersion][0])
+	if v := mf.Tags.First(TagAlbumVersion); conf.Server().Subsonic.AppendAlbumVersion && v != "" {
+		return appendSuffix(mf.Album, v)
 	}
 	return mf.Album
 }
@@ -134,7 +138,7 @@ func (mf MediaFile) ContentType() string {
 
 func (mf MediaFile) CoverArtID() ArtworkID {
 	// If it has a cover art, return it (if feature is disabled, skip)
-	if mf.HasCoverArt && conf.Server.EnableMediaFileCoverArt {
+	if mf.HasCoverArt && conf.Server().EnableMediaFileCoverArt {
 		return artworkIDFromMediaFile(mf)
 	}
 	// Otherwise fallback to disc (if available) or album cover
@@ -236,7 +240,7 @@ func (mf MediaFile) Hash() string {
 	sum.Write(fmt.Appendf(nil, "%d", hash))
 	sum.Write(mf.Tags.Hash())
 	sum.Write(mf.Participants.Hash())
-	return fmt.Sprintf("%x", sum.Sum(nil))
+	return hex.EncodeToString(sum.Sum(nil))
 }
 
 // Equals compares two MediaFiles by their hash. It does not consider the ID, PID, Path and other identifier fields.
@@ -385,7 +389,8 @@ func (mfs MediaFiles) ToAlbum() Album {
 		}
 
 		a.UpdatedAt = newer(a.UpdatedAt, m.UpdatedAt)
-		a.CreatedAt = older(a.CreatedAt, m.BirthTime)
+		a.CreatedAt = older(a.CreatedAt, m.CreatedAt)
+		a.BirthTime = older(a.BirthTime, m.BirthTime)
 		a.Missing = a.Missing && m.Missing
 	}
 
@@ -457,6 +462,32 @@ func mostFrequentPtr(items []*float64) *float64 {
 	return &best
 }
 
+// RecentlyAddedAt is the song counterpart of Album.RecentlyAddedAt.
+func (mf MediaFile) RecentlyAddedAt() time.Time {
+	return recentlyAddedAt(mf.BirthTime, mf.CreatedAt, mf.UpdatedAt, mf.BirthTime)
+}
+
+// recentlyAddedAt picks the RecentlyAddedBy timestamp, then the others in a fixed order, then fallback.
+func recentlyAddedAt(birth, created, updated, fallback time.Time) time.Time {
+	switch conf.Server().RecentlyAddedBy {
+	case consts.RecentlyAddedByModTime:
+		return firstNonZero(updated, created, fallback)
+	case consts.RecentlyAddedByBirth:
+		return firstNonZero(birth, created, updated, fallback)
+	default:
+		return firstNonZero(created, updated, fallback)
+	}
+}
+
+func firstNonZero(candidates ...time.Time) time.Time {
+	for _, t := range candidates {
+		if !t.IsZero() {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 func newer(t1, t2 time.Time) time.Time {
 	if t1.After(t2) {
 		return t1
@@ -522,9 +553,9 @@ func firstArtPath(currentPath string, currentDisc int, m MediaFile) (string, int
 func (mfs MediaFiles) ToM3U8(title string, absolutePaths bool) string {
 	buf := strings.Builder{}
 	buf.WriteString("#EXTM3U\n")
-	buf.WriteString(fmt.Sprintf("#PLAYLIST:%s\n", title))
+	fmt.Fprintf(&buf, "#PLAYLIST:%s\n", title)
 	for _, t := range mfs {
-		buf.WriteString(fmt.Sprintf("#EXTINF:%.f,%s - %s\n", t.Duration, t.Artist, t.Title))
+		fmt.Fprintf(&buf, "#EXTINF:%.f,%s - %s\n", t.Duration, t.Artist, t.Title)
 		if absolutePaths {
 			buf.WriteString(t.AbsolutePath() + "\n")
 		} else {
@@ -537,42 +568,43 @@ func (mfs MediaFiles) ToM3U8(title string, absolutePaths bool) string {
 type MediaFileCursor iter.Seq2[MediaFile, error]
 
 type MediaFileRepository interface {
-	CountAll(options ...QueryOptions) (int64, error)
-	CountBySuffix(options ...QueryOptions) (map[string]int64, error)
-	Exists(id string) (bool, error)
-	Put(m *MediaFile) error
-	UpdateProbeData(id string, data string) error
-	Get(id string) (*MediaFile, error)
-	GetWithParticipants(id string) (*MediaFile, error)
-	GetAll(options ...QueryOptions) (MediaFiles, error)
+	rest.Repository[MediaFile]
+	CountAll(ctx context.Context, options ...QueryOptions) (int64, error)
+	CountBySuffix(ctx context.Context, options ...QueryOptions) (map[string]int64, error)
+	Exists(ctx context.Context, id string) (bool, error)
+	Put(ctx context.Context, m *MediaFile) error
+	UpdateProbeData(ctx context.Context, id string, data string) error
+	Get(ctx context.Context, id string) (*MediaFile, error)
+	GetWithParticipants(ctx context.Context, id string) (*MediaFile, error)
+	GetAll(ctx context.Context, options ...QueryOptions) (MediaFiles, error)
 	// GetRandom returns up to options.Max media files in random order, applying the same
 	// filters as GetAll. Sort/Order are ignored.
-	GetRandom(options ...QueryOptions) (MediaFiles, error)
-	GetAllByTags(tag TagName, values []string, options ...QueryOptions) (MediaFiles, error)
+	GetRandom(ctx context.Context, options ...QueryOptions) (MediaFiles, error)
+	GetAllByTags(ctx context.Context, tag TagName, values []string, options ...QueryOptions) (MediaFiles, error)
 	// MatchesCriteria reports whether the media file matches the criteria's rule
 	// expression, using the logged user's annotations. Limit and offset are ignored.
-	MatchesCriteria(id string, c criteria.Criteria) (bool, error)
-	GetCursor(options ...QueryOptions) (MediaFileCursor, error)
+	MatchesCriteria(ctx context.Context, id string, c criteria.Criteria) (bool, error)
+	GetCursor(ctx context.Context, options ...QueryOptions) (MediaFileCursor, error)
 	// GetAlbumIDsByFolder returns the distinct IDs of albums with non-missing tracks in the given
 	// folders or their direct children.
-	GetAlbumIDsByFolder(lib Library, folderIDs ...string) ([]string, error)
+	GetAlbumIDsByFolder(ctx context.Context, lib Library, folderIDs ...string) ([]string, error)
 	// GetCursorWithArtwork streams like GetCursor, hydrated, so callers that render images don't
 	// pay the scanner's per-row cost; it uses the same id pre-pass as the other cursors.
-	GetCursorWithArtwork(options ...QueryOptions) (MediaFileCursor, error)
-	Delete(id string) error
-	DeleteMissing(ids []string) error
-	DeleteAllMissing() (int64, error)
-	FindByPaths(paths []string) (MediaFiles, error)
+	GetCursorWithArtwork(ctx context.Context, options ...QueryOptions) (MediaFileCursor, error)
+	Delete(ctx context.Context, id string) error
+	DeleteMissing(ctx context.Context, ids []string) error
+	DeleteAllMissing(ctx context.Context) (int64, error)
+	FindByPaths(ctx context.Context, paths []string) (MediaFiles, error)
 	// ReassignReferences moves annotations, bookmarks and playlist entries from prevID to newID,
 	// keeping newID's own row wherever a user has both.
-	ReassignReferences(prevID, newID string) error
+	ReassignReferences(ctx context.Context, prevID, newID string) error
 
 	// The following methods are used exclusively by the scanner:
-	MarkMissing(bool, ...*MediaFile) error
-	MarkMissingByFolder(missing bool, folderIDs ...string) error
-	GetMissingAndMatching(libId int) (MediaFileCursor, error)
-	FindRecentFilesByMBZTrackID(missing MediaFile, since time.Time) (MediaFiles, error)
-	FindRecentFilesByProperties(missing MediaFile, since time.Time) (MediaFiles, error)
+	MarkMissing(ctx context.Context, missing bool, mfs ...*MediaFile) error
+	MarkMissingByFolder(ctx context.Context, missing bool, folderIDs ...string) error
+	GetMissingAndMatching(ctx context.Context, libId int) (MediaFileCursor, error)
+	FindRecentFilesByMBZTrackID(ctx context.Context, missing MediaFile, since time.Time) (MediaFiles, error)
+	FindRecentFilesByProperties(ctx context.Context, missing MediaFile, since time.Time) (MediaFiles, error)
 
 	AnnotatedRepository
 	BookmarkableRepository

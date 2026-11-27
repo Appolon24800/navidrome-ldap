@@ -35,10 +35,10 @@ func (o *oidcLogin) resolveUser(ctx context.Context, subject string, claims oidc
 	identityKey := oidcUserKey("identity", o.issuer, subject)
 	var user *model.User
 	err := o.ds.WithTxImmediate(func(ds model.DataStore) error {
-		users, properties := ds.User(ctx), ds.Property(ctx)
-		boundID, err := properties.Get(identityKey)
+		users, properties := ds.User(), ds.Property()
+		boundID, err := properties.Get(ctx, identityKey)
 		if err == nil {
-			user, err = users.Get(boundID)
+			user, err = users.Get(ctx, boundID)
 			if err == nil {
 				return nil
 			}
@@ -49,7 +49,7 @@ func (o *oidcLogin) resolveUser(ctx context.Context, subject string, claims oidc
 			return err
 		}
 
-		user, err = users.FindByUsername(username)
+		user, err = users.FindByUsername(ctx, username)
 		switch {
 		case err == nil:
 			// An old binding must not inherit a replacement account's data or
@@ -67,7 +67,7 @@ func (o *oidcLogin) resolveUser(ctx context.Context, subject string, claims oidc
 				// Follow Navidrome's external-auth convention: a fresh random
 				// placeholder, independent of all identity-provider credentials.
 				NewPassword: consts.PasswordAutogenPrefix + id.NewRandom()}
-			if err := users.Put(user); err != nil {
+			if err := users.Put(ctx, user); err != nil {
 				return err
 			}
 		default:
@@ -75,17 +75,17 @@ func (o *oidcLogin) resolveUser(ctx context.Context, subject string, claims oidc
 		}
 
 		ownerKey := oidcUserKey("owner", o.issuer, user.ID)
-		owner, err := properties.Get(ownerKey)
+		owner, err := properties.Get(ctx, ownerKey)
 		if err == nil && owner != identityKey {
 			return errors.New("username is already linked to another OIDC identity")
 		}
 		if err != nil && !errors.Is(err, model.ErrNotFound) {
 			return err
 		}
-		if err := properties.Put(identityKey, user.ID); err != nil {
+		if err := properties.Put(ctx, identityKey, user.ID); err != nil {
 			return err
 		}
-		return properties.Put(ownerKey, identityKey)
+		return properties.Put(ctx, ownerKey, identityKey)
 	}, "oidc_user")
 	return user, err
 }

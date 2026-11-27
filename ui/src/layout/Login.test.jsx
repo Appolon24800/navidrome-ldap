@@ -1,6 +1,7 @@
-import React from 'react'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Provider } from 'react-redux'
+import { createStore } from 'redux'
 import Login from './Login'
 import config from '../config'
 
@@ -10,19 +11,29 @@ const mocks = vi.hoisted(() => ({
   dispatch: vi.fn(),
   redirect: vi.fn(),
   replaceState: vi.fn(),
+  checkAuth: vi.fn(),
+  push: vi.fn(),
+  replace: vi.fn(),
 }))
 
 vi.mock('react-admin', async () => {
   const { createTheme } = await vi.importActual('@material-ui/core/styles')
   return {
     createMuiTheme: createTheme,
+    useCheckAuth: () => mocks.checkAuth,
     useLogin: () => mocks.login,
     useNotify: () => mocks.notify,
     useTranslate: () => (key) => key,
     useVersion: () => 0,
   }
 })
-vi.mock('react-redux', () => ({ useDispatch: () => mocks.dispatch }))
+vi.mock('react-redux', async (importOriginal) => ({
+  ...(await importOriginal()),
+  useDispatch: () => mocks.dispatch,
+}))
+vi.mock('react-router-dom', () => ({
+  useHistory: () => ({ push: mocks.push, replace: mocks.replace }),
+}))
 vi.mock('./Notification', () => ({ default: () => null }))
 vi.mock('../themes/useCurrentTheme', () => ({ default: () => ({}) }))
 vi.mock('../utils', () => ({ baseUrl: (path) => `/music${path}` }))
@@ -30,10 +41,20 @@ vi.mock('../actions', () => ({ clearQueue: () => ({ type: 'CLEAR_QUEUE' }) }))
 vi.mock('../consts.js', () => ({ INSIGHTS_DOC_URL: 'https://example.test' }))
 vi.mock('../config', () => ({ default: {} }))
 
+// Each suite changes the shared configuration, so restore it for the next test.
+const initialConfig = { ...config }
+
+afterEach(() => {
+  cleanup()
+  Object.keys(config).forEach((key) => delete config[key])
+  Object.assign(config, initialConfig)
+})
+
 describe('OIDC login-page redirect', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.login.mockResolvedValue({})
+    mocks.checkAuth.mockRejectedValue(new Error('not signed in'))
     Object.assign(config, {
       firstTime: false,
       oidcEnabled: true,
@@ -56,10 +77,7 @@ describe('OIDC login-page redirect', () => {
     )
   })
 
-  afterEach(() => {
-    cleanup()
-    vi.unstubAllGlobals()
-  })
+  afterEach(() => vi.unstubAllGlobals())
 
   const showLogin = (search = '') =>
     render(<Login location={{ search, state: null }} />)
@@ -131,5 +149,41 @@ describe('OIDC login-page redirect', () => {
     expect(
       document.querySelector('input[name="confirmPassword"]'),
     ).toBeInTheDocument()
+  })
+})
+
+const renderLogin = () =>
+  render(
+    <Provider store={createStore(() => ({}))}>
+      <Login location={{}} />
+    </Provider>,
+  )
+
+describe('<Login />', () => {
+  beforeEach(() => {
+    mocks.checkAuth.mockReset()
+    mocks.push.mockReset()
+    mocks.replace.mockReset()
+  })
+
+  it('replaces the login page with the home page when already signed in', async () => {
+    mocks.checkAuth.mockResolvedValue()
+
+    renderLogin()
+
+    await waitFor(() => expect(mocks.replace).toHaveBeenCalledWith('/'))
+    expect(mocks.checkAuth).toHaveBeenCalledWith({}, false)
+    expect(mocks.push).not.toHaveBeenCalled()
+  })
+
+  it('shows the login form when the user is not signed in', async () => {
+    mocks.checkAuth.mockRejectedValue()
+
+    renderLogin()
+
+    await waitFor(() => expect(mocks.checkAuth).toHaveBeenCalledWith({}, false))
+    expect(screen.getByText('ra.auth.sign_in')).toBeInTheDocument()
+    expect(mocks.replace).not.toHaveBeenCalled()
+    expect(mocks.push).not.toHaveBeenCalled()
   })
 })

@@ -5,12 +5,26 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"time"
+
+	"github.com/spf13/viper"
 )
+
+type oidcOptions struct {
+	Enabled            bool
+	AutoRedirect       bool
+	DisplayName        string
+	IssuerURL          string
+	ClientID           string
+	ClientSecret       string
+	RedirectURL        string
+	MaxSessionDuration time.Duration
+}
 
 // OIDC uses administrator-configured URLs, never request Host or forwarded headers.
 // HTTP is permitted only on loopback addresses for local development.
-func validateOIDC() error {
-	o := Server.OIDC
+func (s *Options) validateOIDC() error {
+	o := s.OIDC
 	if !o.Enabled {
 		if o.AutoRedirect {
 			return fmt.Errorf("OIDC.AutoRedirect requires OIDC.Enabled=true")
@@ -31,7 +45,7 @@ func validateOIDC() error {
 			return fmt.Errorf("OIDC.%s requires HTTPS (HTTP is allowed only on loopback)", name)
 		}
 		if name == "RedirectURL" {
-			base, err := url.Parse(Server.BaseURL)
+			base, err := url.Parse(s.BaseURL)
 			if err != nil || u.Path != strings.TrimRight(base.Path, "/")+"/auth/oidc/callback" {
 				return fmt.Errorf("OIDC.RedirectURL must end with the configured base path followed by /auth/oidc/callback")
 			}
@@ -41,4 +55,18 @@ func validateOIDC() error {
 		return fmt.Errorf("OIDC.MaxSessionDuration must be positive")
 	}
 	return nil
+}
+
+// oidcDefaults is called from setViperDefaults. The OIDC options, their
+// validation and their defaults live in this fork-owned file so that upstream
+// edits to configuration.go merge without conflicts.
+func oidcDefaults() {
+	viper.SetDefault("oidc.enabled", false)
+	viper.SetDefault("oidc.autoredirect", false)
+	viper.SetDefault("oidc.displayname", "PocketID")
+	viper.SetDefault("oidc.issuerurl", "")
+	viper.SetDefault("oidc.clientid", "")
+	viper.SetDefault("oidc.clientsecret", "")
+	viper.SetDefault("oidc.redirecturl", "")
+	viper.SetDefault("oidc.maxsessionduration", 12*time.Hour)
 }

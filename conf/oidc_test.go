@@ -7,7 +7,7 @@ import (
 
 func TestOIDCConfiguration(t *testing.T) {
 	t.Cleanup(SnapshotConfig())
-	Server.BaseURL = "https://music.example/music"
+	Update(func(c *Options) { c.BaseURL = "https://music.example/music" })
 	valid := oidcOptions{Enabled: true, DisplayName: "PocketID", ClientID: "navidrome",
 		IssuerURL: "https://id.example", RedirectURL: "https://music.example/music/auth/oidc/callback",
 		MaxSessionDuration: time.Hour}
@@ -31,9 +31,10 @@ func TestOIDCConfiguration(t *testing.T) {
 		{"no deadline", func(o *oidcOptions) { o.MaxSessionDuration = 0 }, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			Server.OIDC = valid
-			test.change(&Server.OIDC)
-			if err := validateOIDC(); (err == nil) != test.valid {
+			Update(func(c *Options) { c.OIDC = valid })
+			Update(func(c *Options) { test.change(&c.OIDC) })
+			options := Server()
+			if err := options.validateOIDC(); (err == nil) != test.valid {
 				t.Fatalf("validation error: %v (valid=%v)", err, test.valid)
 			}
 		})

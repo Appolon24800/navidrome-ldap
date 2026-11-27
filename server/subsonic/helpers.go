@@ -10,7 +10,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
@@ -72,7 +71,7 @@ func getUser(ctx context.Context) model.User {
 }
 
 func sortName(sortName, orderName string) string {
-	if conf.Server.PreferSortTags {
+	if conf.Server().PreferSortTags {
 		return cmp.Or(
 			sortName,
 			orderName,
@@ -86,7 +85,7 @@ func getArtistAlbumCount(a *model.Artist) int32 {
 	// where the artist is an album artist OR artist. Use the custom stat
 	// main credit for this calculation.
 	// Otherwise, return just the roles as album artist (precise)
-	if conf.Server.Subsonic.ArtistParticipations {
+	if conf.Server().Subsonic.ArtistParticipations {
 		mainCreditStats := a.Stats[model.RoleMainCredit]
 		return int32(mainCreditStats.AlbumCount)
 	} else {
@@ -114,7 +113,7 @@ func toArtist(r *http.Request, a model.Artist) responses.Artist {
 	if !a.ImageAbsent {
 		artist.ArtistImageUrl = publicurl.ImageURL(r.Context(), a.CoverArtID(), 600)
 	}
-	if conf.Server.Subsonic.EnableAverageRating {
+	if conf.Server().Subsonic.EnableAverageRating {
 		artist.AverageRating = a.AverageRating
 	}
 	if a.Starred {
@@ -134,7 +133,7 @@ func toArtistID3(r *http.Request, a model.Artist) responses.ArtistID3 {
 	if !a.ImageAbsent {
 		artist.ArtistImageUrl = publicurl.ImageURL(r.Context(), a.CoverArtID(), 600)
 	}
-	if conf.Server.Subsonic.EnableAverageRating {
+	if conf.Server().Subsonic.EnableAverageRating {
 		artist.AverageRating = a.AverageRating
 	}
 	if a.Starred {
@@ -146,7 +145,7 @@ func toArtistID3(r *http.Request, a model.Artist) responses.ArtistID3 {
 
 func toOSArtistID3(ctx context.Context, a model.Artist) *responses.OpenSubsonicArtistID3 {
 	player, _ := request.PlayerFrom(ctx)
-	if strings.Contains(conf.Server.Subsonic.LegacyClients, player.Client) {
+	if strings.Contains(conf.Server().Subsonic.LegacyClients, player.Client) {
 		return nil
 	}
 	artist := responses.OpenSubsonicArtistID3{
@@ -207,7 +206,7 @@ func childFromMediaFile(ctx context.Context, mf model.MediaFile) responses.Child
 	child.IsDir = false
 
 	player, ok := request.PlayerFrom(ctx)
-	if ok && isClientInList(conf.Server.Subsonic.MinimalClients, player.Client) {
+	if ok && isClientInList(conf.Server().Subsonic.MinimalClients, player.Client) {
 		return child
 	}
 
@@ -230,7 +229,7 @@ func childFromMediaFile(ctx context.Context, mf model.MediaFile) responses.Child
 		child.Path = fakePath(mf)
 	}
 	child.DiscNumber = int32(mf.DiscNumber)
-	child.Created = new(mediaFileCreatedAt(mf))
+	child.Created = new(mf.RecentlyAddedAt())
 	child.AlbumId = mf.AlbumID
 	child.ArtistId = mf.ArtistID
 	child.Type = "music"
@@ -239,7 +238,7 @@ func childFromMediaFile(ctx context.Context, mf model.MediaFile) responses.Child
 		child.Starred = mf.StarredAt
 	}
 	child.UserRating = int32(mf.Rating)
-	if conf.Server.Subsonic.EnableAverageRating {
+	if conf.Server().Subsonic.EnableAverageRating {
 		child.AverageRating = mf.AverageRating
 	}
 
@@ -255,7 +254,7 @@ func childFromMediaFile(ctx context.Context, mf model.MediaFile) responses.Child
 
 func osChildFromMediaFile(ctx context.Context, mf model.MediaFile) *responses.OpenSubsonicChild {
 	player, ok := request.PlayerFrom(ctx)
-	if ok && isClientInList(conf.Server.Subsonic.LegacyClients, player.Client) {
+	if ok && isClientInList(conf.Server().Subsonic.LegacyClients, player.Client) {
 		return nil
 	}
 	child := responses.OpenSubsonicChild{}
@@ -324,51 +323,19 @@ func artistRefs(participants model.ParticipantList) []responses.ArtistID3Ref {
 func fakePath(mf model.MediaFile) string {
 	builder := strings.Builder{}
 
-	builder.WriteString(fmt.Sprintf("%s/%s/", sanitizeSlashes(mf.AlbumArtist), sanitizeSlashes(mf.FullAlbumName())))
+	fmt.Fprintf(&builder, "%s/%s/", sanitizeSlashes(mf.AlbumArtist), sanitizeSlashes(mf.FullAlbumName()))
 	if mf.DiscNumber != 0 {
-		builder.WriteString(fmt.Sprintf("%02d-", mf.DiscNumber))
+		fmt.Fprintf(&builder, "%02d-", mf.DiscNumber)
 	}
 	if mf.TrackNumber != 0 {
-		builder.WriteString(fmt.Sprintf("%02d - ", mf.TrackNumber))
+		fmt.Fprintf(&builder, "%02d - ", mf.TrackNumber)
 	}
-	builder.WriteString(fmt.Sprintf("%s.%s", sanitizeSlashes(mf.FullTitle()), mf.Suffix))
+	fmt.Fprintf(&builder, "%s.%s", sanitizeSlashes(mf.FullTitle()), mf.Suffix)
 	return builder.String()
 }
 
 func sanitizeSlashes(target string) string {
 	return strings.ReplaceAll(target, "/", "_")
-}
-
-// albumCreatedAt mirrors the column used by recentlyAddedSort so clients can
-// reproduce the "recently added" order locally: UpdatedAt when
-// RecentlyAddedByModTime is set, CreatedAt otherwise. The other timestamps are
-// fallbacks for legacy rows; returns zero only when all three are unset.
-func albumCreatedAt(al model.Album) time.Time {
-	candidates := []time.Time{al.CreatedAt, al.UpdatedAt, al.ImportedAt}
-	if conf.Server.RecentlyAddedByModTime {
-		candidates = []time.Time{al.UpdatedAt, al.CreatedAt, al.ImportedAt}
-	}
-	for _, t := range candidates {
-		if !t.IsZero() {
-			return t
-		}
-	}
-	return time.Time{}
-}
-
-// mediaFileCreatedAt is the song counterpart of albumCreatedAt, tracking
-// mediaFileRecentlyAddedSort; BirthTime is the legacy fallback.
-func mediaFileCreatedAt(mf model.MediaFile) time.Time {
-	candidates := []time.Time{mf.CreatedAt, mf.UpdatedAt, mf.BirthTime}
-	if conf.Server.RecentlyAddedByModTime {
-		candidates = []time.Time{mf.UpdatedAt, mf.CreatedAt, mf.BirthTime}
-	}
-	for _, t := range candidates {
-		if !t.IsZero() {
-			return t
-		}
-	}
-	return time.Time{}
 }
 
 func childFromAlbum(ctx context.Context, al model.Album) responses.Child {
@@ -383,7 +350,7 @@ func childFromAlbum(ctx context.Context, al model.Album) responses.Child {
 	child.Year = int32(cmp.Or(al.MaxOriginalYear, al.MaxYear))
 	child.Genre = al.Genre
 	child.CoverArt = coverArtOrEmpty(al.CoverArtID(), al.ImageAbsent)
-	child.Created = new(albumCreatedAt(al))
+	child.Created = new(al.RecentlyAddedAt())
 	child.Parent = al.AlbumArtistID
 	child.ArtistId = al.AlbumArtistID
 	child.Duration = int32(al.Duration)
@@ -393,7 +360,7 @@ func childFromAlbum(ctx context.Context, al model.Album) responses.Child {
 	}
 	child.PlayCount = al.PlayCount
 	child.UserRating = int32(al.Rating)
-	if conf.Server.Subsonic.EnableAverageRating {
+	if conf.Server().Subsonic.EnableAverageRating {
 		child.AverageRating = al.AverageRating
 	}
 	child.OpenSubsonicChild = osChildFromAlbum(ctx, al)
@@ -402,7 +369,7 @@ func childFromAlbum(ctx context.Context, al model.Album) responses.Child {
 
 func osChildFromAlbum(ctx context.Context, al model.Album) *responses.OpenSubsonicChild {
 	player, _ := request.PlayerFrom(ctx)
-	if strings.Contains(conf.Server.Subsonic.LegacyClients, player.Client) {
+	if strings.Contains(conf.Server().Subsonic.LegacyClients, player.Client) {
 		return nil
 	}
 	child := responses.OpenSubsonicChild{}
@@ -479,7 +446,7 @@ func buildAlbumID3(ctx context.Context, album model.Album) responses.AlbumID3 {
 	dir.PlayCount = album.PlayCount
 	dir.Year = int32(cmp.Or(album.MaxOriginalYear, album.MaxYear))
 	dir.Genre = album.Genre
-	dir.Created = albumCreatedAt(album)
+	dir.Created = album.RecentlyAddedAt()
 	if album.Starred {
 		dir.Starred = album.StarredAt
 	}
@@ -489,7 +456,7 @@ func buildAlbumID3(ctx context.Context, album model.Album) responses.AlbumID3 {
 
 func buildOSAlbumID3(ctx context.Context, album model.Album) *responses.OpenSubsonicAlbumID3 {
 	player, _ := request.PlayerFrom(ctx)
-	if strings.Contains(conf.Server.Subsonic.LegacyClients, player.Client) {
+	if strings.Contains(conf.Server().Subsonic.LegacyClients, player.Client) {
 		return nil
 	}
 	dir := responses.OpenSubsonicAlbumID3{}
@@ -497,7 +464,7 @@ func buildOSAlbumID3(ctx context.Context, album model.Album) *responses.OpenSubs
 		dir.Played = album.PlayDate
 	}
 	dir.UserRating = int32(album.Rating)
-	if conf.Server.Subsonic.EnableAverageRating {
+	if conf.Server().Subsonic.EnableAverageRating {
 		dir.AverageRating = album.AverageRating
 	}
 	dir.RecordLabels = slice.Map(album.Tags.Values(model.TagRecordLabel), func(s string) responses.RecordLabel {
@@ -515,9 +482,7 @@ func buildOSAlbumID3(ctx context.Context, album model.Album) *responses.OpenSubs
 	dir.IsCompilation = album.Compilation
 	dir.DiscTitles = buildDiscSubtitles(album)
 	dir.ExplicitStatus = mapExplicitStatus(album.ExplicitStatus)
-	if len(album.Tags.Values(model.TagAlbumVersion)) > 0 {
-		dir.Version = album.Tags.Values(model.TagAlbumVersion)[0]
-	}
+	dir.Version = album.Tags.First(model.TagAlbumVersion)
 
 	return &dir
 }

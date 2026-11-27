@@ -13,7 +13,7 @@ import (
 // and the liveness sweep leave IsAdmin alone — the value persisted in
 // the user table is authoritative.
 func adminCheckEnabled() bool {
-	return conf.Server.LDAP.AdminGroup != "" || conf.Server.LDAP.AdminFilter != ""
+	return conf.Server().LDAP.AdminGroup != "" || conf.Server().LDAP.AdminFilter != ""
 }
 
 // buildAdminFilter constructs the LDAP filter used to determine
@@ -23,11 +23,11 @@ func adminCheckEnabled() bool {
 // LDAP connection.
 func buildAdminFilter(userName string) string {
 	escaped := ldap.EscapeFilter(userName)
-	if g := conf.Server.LDAP.AdminGroup; g != "" {
-		userFilter := fmt.Sprintf(conf.Server.LDAP.SearchFilter, escaped)
+	if g := conf.Server().LDAP.AdminGroup; g != "" {
+		userFilter := fmt.Sprintf(conf.Server().LDAP.SearchFilter, escaped)
 		return "(&(memberOf=" + ldap.EscapeFilter(g) + ")" + userFilter + ")"
 	}
-	if af := conf.Server.LDAP.AdminFilter; af != "" {
+	if af := conf.Server().LDAP.AdminFilter; af != "" {
 		return fmt.Sprintf(af, escaped)
 	}
 	return ""
@@ -49,7 +49,7 @@ func ldapAdminCheck(l *ldap.Conn, userName string) (isAdmin bool, err error) {
 		return false, nil
 	}
 	sr, err := l.Search(ldap.NewSearchRequest(
-		conf.Server.LDAP.Base, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
+		conf.Server().LDAP.Base, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
 		filter, []string{"dn"}, nil,
 	))
 	if err != nil {

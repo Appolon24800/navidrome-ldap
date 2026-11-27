@@ -9,12 +9,14 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/core/storage"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/utils"
+	"golang.org/x/text/unicode/norm"
 )
 
 // walkDirTree recursively walks the directory tree starting from the given targetFolders.
@@ -43,16 +45,25 @@ func walkDirTree(ctx context.Context, job *scanJob, targetFolders ...string) (<-
 				continue
 			}
 
-			// Create checker and push patterns from root to this folder
+			// A full walk never descends into symlinked folders when following is disabled, so a
+			// target reached through one (e.g. a watcher event for a new link) is skipped too.
+			if !conf.Server().Scanner.FollowSymlinks && isSymlinkedPath(job.fs, folderPath) {
+				log.Debug(ctx, "Scanner: Skipping symlinked target folder, following is disabled", "path", folderPath)
+				continue
+			}
+
+			// walkFolder pushes the target folder's own patterns, so only its parents are pushed here
 			checker := newIgnoreChecker(job.fs)
-			err = checker.PushAllParents(ctx, folderPath)
-			if err != nil {
-				log.Error(ctx, "Scanner: Error pushing ignore patterns for target folder", "path", folderPath, err)
+			if checker.PushParents(ctx, folderPath) {
+				log.Debug(ctx, "Scanner: Skipping target folder ignored by its parents", "path", folderPath)
 				continue
 			}
 
 			// Recursively walk this folder and all its children
 			err = walkFolder(ctx, job, folderPath, checker, results)
+			if utils.IsCtxDone(ctx) {
+				return
+			}
 			if err != nil {
 				log.Error(ctx, "Scanner: Error walking target folder", "path", folderPath, err)
 				continue
@@ -87,9 +98,12 @@ func walkFolder(ctx context.Context, job *scanJob, currentFolder string, checker
 	folder.path = dir
 	folder.elapsed.Start()
 
-	results <- folder
-
-	return nil
+	select {
+	case results <- folder:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func loadDir(ctx context.Context, job *scanJob, dirPath string, checker *IgnoreChecker) (folder *folderEntry, children []string, err error) {
@@ -161,6 +175,8 @@ func loadDir(ctx context.Context, job *scanJob, dirPath string, checker *IgnoreC
 			case model.IsImageFile(name):
 				folder.imageFiles[entry.Name()] = entry
 				folder.imagesUpdatedAt = utils.TimeNewest(folder.imagesUpdatedAt, fileInfo.ModTime(), folder.modTime)
+			case job.isLyricsFile(entry.Name()):
+				folder.lyricsFiles[entry.Name()] = entry
 			}
 		}
 	}
@@ -208,7 +224,7 @@ func isDirOrSymlinkToDir(fsys fs.FS, baseDir string, dirEnt fs.DirEntry) (bool, 
 		return false, nil
 	}
 	// If symlinks are disabled, return false for symlinks
-	if !conf.Server.Scanner.FollowSymlinks {
+	if !conf.Server().Scanner.FollowSymlinks {
 		return false, nil
 	}
 	// Does this symlink point to a directory?
@@ -217,6 +233,18 @@ func isDirOrSymlinkToDir(fsys fs.FS, baseDir string, dirEnt fs.DirEntry) (bool, 
 		return false, err
 	}
 	return fileInfo.IsDir(), nil
+}
+
+// isSymlinkedPath returns true if folderPath, or any of its parent folders, is a symbolic link.
+// It needs fsys to implement fs.ReadLinkFS, otherwise links are followed and never detected.
+func isSymlinkedPath(fsys fs.FS, folderPath string) bool {
+	for p := path.Clean(folderPath); p != "." && p != "/"; p = path.Dir(p) {
+		info, err := fs.Lstat(fsys, p)
+		if err == nil && info.Mode()&fs.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 const maxSymlinkHops = 40
@@ -230,7 +258,7 @@ func resolveEntryName(ctx context.Context, fsys fs.FS, dirPath string, entry fs.
 		return entry.Name(), true
 	}
 	linkPath := path.Join(dirPath, entry.Name())
-	if !conf.Server.Scanner.FollowSymlinks {
+	if !conf.Server().Scanner.FollowSymlinks {
 		log.Trace(ctx, "Scanner: Skipping symlink, following is disabled", "path", linkPath)
 		return "", false
 	}
@@ -249,7 +277,7 @@ func resolveEntryName(ctx context.Context, fsys fs.FS, dirPath string, entry fs.
 		return resolved, true
 	}
 	cur := linkPath
-	for hop := 0; hop < maxSymlinkHops; hop++ {
+	for hop := range maxSymlinkHops {
 		target, err := fs.ReadLink(fsys, cur)
 		if err != nil {
 			if hop == 0 {
@@ -286,11 +314,12 @@ func isDirReadable(ctx context.Context, fsys fs.FS, dirPath string) bool {
 	return true
 }
 
-// List of special directories to ignore
+// ignoredDirs lists special directories to ignore
 var ignoredDirs = []string{
 	"$RECYCLE.BIN",
 	"#snapshot",
 	"@Recycle",
+	"@eaDir",
 	"@Recently-Snapshot",
 	".git",
 	".streams",
@@ -307,7 +336,7 @@ func isIgnoredEntry(name string, isDir bool) bool {
 	if isDir && isDirIgnored(name) {
 		return true
 	}
-	return isDotEntry(name) && (!isDir || conf.Server.Scanner.IgnoreDotFolders)
+	return isDotEntry(name) && (!isDir || conf.Server().Scanner.IgnoreDotFolders)
 }
 
 // isDirIgnored returns true if the directory name is in the explicit ignoredDirs
@@ -323,4 +352,24 @@ func isDirIgnored(name string) bool {
 // folders sometimes start with ellipses), so all of these return false.
 func isDotEntry(name string) bool {
 	return name != "." && strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "..")
+}
+
+func (j *scanJob) isLyricsFile(name string) bool {
+	name = norm.NFC.String(name)
+	return slices.ContainsFunc(j.lyricsSuffixes, func(suffix string) bool {
+		return hasSuffixFold(name, suffix)
+	})
+}
+
+// hasSuffixFold counts runes, not bytes: case folding can change a rune's byte length (ſ and s).
+func hasSuffixFold(name, suffix string) bool {
+	i := len(name)
+	for range utf8.RuneCountInString(suffix) {
+		if i == 0 {
+			return false
+		}
+		_, size := utf8.DecodeLastRuneInString(name[:i])
+		i -= size
+	}
+	return i > 0 && strings.EqualFold(name[i:], suffix)
 }

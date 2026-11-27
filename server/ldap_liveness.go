@@ -39,7 +39,7 @@ type adminProbeFn func(userName string) (isAdmin bool, err error)
 // is aborted without revoking anything; the next scheduled tick will
 // retry. Per-user search errors log a warning and skip just that user.
 func LDAPLivenessCheck(ctx context.Context, ds model.DataStore) {
-	if conf.Server.LDAP.Host == "" {
+	if conf.Server().LDAP.Host == "" {
 		return
 	}
 
@@ -47,7 +47,7 @@ func LDAPLivenessCheck(ctx context.Context, ds model.DataStore) {
 	// handshake + bind on every tick when there's nothing to reconcile
 	// (just-after-rollout, mostly-local installs that enabled the feature
 	// speculatively, etc.).
-	users, err := ds.User(ctx).GetAll(model.QueryOptions{
+	users, err := ds.User().GetAll(ctx, model.QueryOptions{
 		Filters: squirrel.Eq{"auth_type": model.AuthTypeLDAP},
 	})
 	if err != nil {
@@ -58,15 +58,15 @@ func LDAPLivenessCheck(ctx context.Context, ds model.DataStore) {
 		return
 	}
 
-	l, err := ldap.DialURL(conf.Server.LDAP.Host)
+	l, err := ldap.DialURL(conf.Server().LDAP.Host)
 	if err != nil {
-		log.Warn(ctx, "LDAP liveness: dial failed; skipping run", "host", conf.Server.LDAP.Host, err)
+		log.Warn(ctx, "LDAP liveness: dial failed; skipping run", "host", conf.Server().LDAP.Host, err)
 		return
 	}
 	defer l.Close()
 
-	if err := l.Bind(conf.Server.LDAP.BindDN, conf.Server.LDAP.BindPassword); err != nil {
-		log.Warn(ctx, "LDAP liveness: service-account bind failed; skipping run", "bindDN", conf.Server.LDAP.BindDN, err)
+	if err := l.Bind(conf.Server().LDAP.BindDN, conf.Server().LDAP.BindPassword); err != nil {
+		log.Warn(ctx, "LDAP liveness: service-account bind failed; skipping run", "bindDN", conf.Server().LDAP.BindDN, err)
 		return
 	}
 
@@ -90,7 +90,7 @@ func runLDAPLivenessCheck(ctx context.Context, ds model.DataStore, probe livenes
 		return
 	}
 
-	appRepo := ds.AppPassword(ctx)
+	appRepo := ds.AppPassword()
 	checked := 0
 	revoked := 0
 	adminChanged := 0
@@ -109,7 +109,7 @@ func runLDAPLivenessCheck(ctx context.Context, ds model.DataStore, probe livenes
 		checked++
 
 		if !active {
-			n, revokeErr := appRepo.RevokeAllForUser(u.ID)
+			n, revokeErr := appRepo.RevokeAllForUser(ctx, u.ID)
 			if revokeErr != nil {
 				log.Error(ctx, "LDAP liveness: failed to revoke app passwords", "user", u.UserName, revokeErr)
 			} else {
@@ -135,7 +135,7 @@ func runLDAPLivenessCheck(ctx context.Context, ds model.DataStore, probe livenes
 				log.Warn(ctx, "LDAP liveness: admin probe failed; preserving IsAdmin", "user", u.UserName, adminErr)
 			} else if u.IsAdmin != newIsAdmin {
 				u.IsAdmin = newIsAdmin
-				if err := ds.User(ctx).Put(&u); err != nil {
+				if err := ds.User().Put(ctx, &u); err != nil {
 					log.Error(ctx, "LDAP liveness: failed to persist IsAdmin change", "user", u.UserName, err)
 				} else {
 					adminChanged++
@@ -155,7 +155,7 @@ func runLDAPLivenessCheck(ctx context.Context, ds model.DataStore, probe livenes
 // ldap.EscapeFilter to neutralize filter metacharacters before
 // substitution.
 func presenceFilter(userName string) string {
-	return fmt.Sprintf(conf.Server.LDAP.SearchFilter, ldap.EscapeFilter(userName))
+	return fmt.Sprintf(conf.Server().LDAP.SearchFilter, ldap.EscapeFilter(userName))
 }
 
 // disabledFilter builds the "is this user disabled?" LDAP filter by
@@ -164,7 +164,7 @@ func presenceFilter(userName string) string {
 // empty — the caller should skip the disabled-check search in that
 // case.
 func disabledFilter(userName string) string {
-	df := conf.Server.LDAP.DisabledFilter
+	df := conf.Server().LDAP.DisabledFilter
 	if df == "" {
 		return ""
 	}
@@ -176,7 +176,7 @@ func disabledFilter(userName string) string {
 // account.
 func ldapProbe(l *ldap.Conn) livenessProbe {
 	return func(userName string) (active bool, reason string, err error) {
-		base := conf.Server.LDAP.Base
+		base := conf.Server().LDAP.Base
 		userFilter := presenceFilter(userName)
 
 		// Does the user exist in the directory at all?

@@ -24,16 +24,21 @@ func (api *Router) authenticateByName(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Navidrome stores recoverable passwords; this mirrors Subsonic's validateCredentials plaintext path.
-	usr, err := api.ds.User(ctx).FindByUsernameWithPassword(body.Username)
+	usr, err := api.ds.User().FindByUsernameWithPassword(ctx, body.Username)
 	if body.Pw == "" || err != nil || usr == nil || usr.Password != body.Pw {
 		log.Warn(ctx, "Jellyfin API: invalid login", "username", body.Username, "remoteAddr", r.RemoteAddr)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	api.signIn(w, r, usr)
+}
+
+func (api *Router) signIn(w http.ResponseWriter, r *http.Request, usr *model.User) {
+	ctx := r.Context()
 	// Best-effort, like the web UI's validateLogin: without it, Jellyfin-only users show a
 	// never/stale "Last Login" in the admin UI.
-	if err := api.ds.User(ctx).UpdateLastLoginAt(usr.ID); err != nil {
-		log.Error(ctx, "Jellyfin API: could not update last login date", "username", body.Username, err)
+	if err := api.ds.User().UpdateLastLoginAt(ctx, usr.ID); err != nil {
+		log.Error(ctx, "Jellyfin API: could not update last login date", "username", usr.UserName, err)
 	}
 
 	token, err := auth.CreateAPIToken(usr, auth.AudienceJellyfin)
@@ -45,7 +50,7 @@ func (api *Router) authenticateByName(w http.ResponseWriter, r *http.Request) {
 	a := parseMediaBrowserAuth(r)
 	serverID := api.serverID(ctx)
 	api.ok(w, r, dto.AuthenticationResult{
-		User:        userToDto(usr, api.serverName(), serverID),
+		User:        userToDto(usr, serverName(), serverID),
 		SessionInfo: dto.NewSessionInfo(usr, a.Client, a.DeviceId, a.Device, a.Version, serverID),
 		AccessToken: token,
 		ServerId:    serverID,
@@ -84,7 +89,7 @@ func userPolicy(u *model.User) *dto.UserPolicy {
 		EnableSharedDeviceControl:        false,
 		EnableRemoteAccess:               true,
 		EnableLiveTvManagement:           false,
-		EnableLiveTvAccess:               false,
+		EnableLiveTvAccess:               true,
 		EnableMediaPlayback:              true,
 		EnableAudioPlaybackTranscoding:   true,
 		EnableVideoPlaybackTranscoding:   true,

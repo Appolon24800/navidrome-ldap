@@ -16,6 +16,7 @@ import (
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/plugins/host"
 	"github.com/navidrome/navidrome/utils/httpclient"
+	"github.com/navidrome/navidrome/utils/netguard"
 )
 
 const (
@@ -53,6 +54,7 @@ func newHTTPService(pluginName string, permission *HTTPPermission) *httpServiceI
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 		Control:   svc.dialControl,
+		Resolver:  dialResolver,
 	}).DialContext
 	// No client timeout: it is set per-request via context deadline.
 	svc.client = &http.Client{Transport: httpclient.NewTransport(svc.transport)}
@@ -123,7 +125,7 @@ func (s *httpServiceImpl) Send(ctx context.Context, request host.HTTPRequest) (*
 	}
 
 	// Execute request
-	resp, err := s.client.Do(httpReq) //nolint:gosec // URL is validated against requiredHosts
+	resp, err := s.client.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +203,7 @@ func isPrivateOrLoopback(hostname string) bool {
 	if ip == nil {
 		return false
 	}
-	return isPrivateIP(ip)
+	return netguard.IsPrivateIP(ip)
 }
 
 // Verify interface implementation
