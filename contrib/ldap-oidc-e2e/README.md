@@ -15,7 +15,9 @@ stop when the script ends.
 
 - `go` and `python3`
 - OpenLDAP server and client tools: `slapd`, `ldapadd`, `ldapmodify`, `ldapdelete`.
-  On Debian and Ubuntu: `apt install slapd ldap-utils`.
+  On Debian and Ubuntu: `apt install slapd ldap-utils`. There the AppArmor profile of the
+  `slapd` package blocks a private instance in a temporary directory. Unload it first:
+  `sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd`.
 
 ## Run
 

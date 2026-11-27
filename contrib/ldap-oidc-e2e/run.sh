@@ -26,7 +26,8 @@ SCHEMA=$(find_dir "${SCHEMA_DIR:-/etc/openldap/schema /etc/ldap/schema}" core.sc
   { echo "OpenLDAP schema directory not found (no core.schema)" >&2; exit 2; }
 # Debian and Ubuntu ship the mdb backend and the memberof overlay as modules. Other builds, and
 # possibly this one, have them built in. MODULES is empty when no module directory exists.
-MODULES=$(find_dir "${MODULE_DIR:-/usr/lib/openldap /usr/lib/ldap /usr/libexec/openldap}" memberof.so) || MODULES=""
+MODULES=$(find_dir "${MODULE_DIR:-/usr/lib/openldap /usr/lib/ldap /usr/libexec/openldap}" back_mdb.so) ||
+  MODULES=$(find_dir "${MODULE_DIR:-/usr/lib/openldap /usr/lib/ldap /usr/libexec/openldap}" memberof.so) || MODULES=""
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/navidrome-e2e.XXXXXX")
 SLAPD_PORT=${SLAPD_PORT:-3899}
@@ -69,7 +70,14 @@ PY
 "$SLAPD" -h "ldap://127.0.0.1:$SLAPD_PORT/" -f "$WORK/slapd.conf" -F "$WORK/ldap/slapd.d" -d 256 \
   > "$WORK/ldap/slapd.log" 2>&1 &
 PIDS="$PIDS $!"
-wait_for_port "$SLAPD_PORT" slapd
+if ! wait_for_port "$SLAPD_PORT" slapd; then
+  tail -n 20 "$WORK/ldap/slapd.log" >&2
+  if command -v aa-status >/dev/null 2>&1 && sudo -n aa-status 2>/dev/null | grep -q slapd; then
+    echo "The AppArmor profile of the slapd package confines slapd to its system paths. Unload it first:" >&2
+    echo "  sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd" >&2
+  fi
+  exit 1
+fi
 ldapadd -H "ldap://127.0.0.1:$SLAPD_PORT" -x -D "cn=Service,dc=example,dc=org" -w service-secret \
   -f "$HERE/ldap/data.ldif" > "$WORK/ldap/load.log" 2>&1 || { cat "$WORK/ldap/load.log" >&2; exit 1; }
 

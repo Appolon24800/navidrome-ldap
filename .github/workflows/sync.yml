@@ -88,6 +88,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y slapd ldap-utils
+          # Ubuntu confines slapd with AppArmor to its system paths. The end-to-end check runs a
+          # private instance from a temporary directory, so the profile has to go.
+          [ ! -f /etc/apparmor.d/usr.sbin.slapd ] || sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd
 
       - name: Build and test the merge
         id: verify
