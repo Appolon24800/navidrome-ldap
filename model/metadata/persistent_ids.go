@@ -122,9 +122,9 @@ func (md Metadata) albumID(mf model.MediaFile, pidConf string) string {
 
 // BFR Must be configurable?
 
-func (md Metadata) artistID(name string) string {
+func artistID(name string) string {
 	mf := model.MediaFile{AlbumArtist: name}
-	return computePID(mf, md, "albumartistid", "", false, id.NewHash)
+	return computePID(mf, Metadata{}, "albumartistid", "", false, id.NewHash)
 }
 
 func (md Metadata) mapTrackTitle() string {

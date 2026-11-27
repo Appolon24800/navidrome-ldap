@@ -79,6 +79,12 @@ Several cloud hosting providers partner with us to offer [officially supported, 
  - **Transcoding** on the fly. Can be set per user/player. **Opus encoding is supported**
  - Translated to **various languages**
 
+## MusicBrainz track credits
+
+Set `ND_ENABLEMUSICBRAINZTRACKCREDITS=true` to fill in missing collaborators from MusicBrainz. When a Subsonic client opens an album or a track, Navidrome queues a release lookup. Once the scan finishes, subsequent client requests include the full track artists. The album's **Refresh Metadata** action fetches fresh credits.
+
+Navidrome matches exact release and track IDs, and fills credits on tracks with one local artist. It caches release credits in its database and reapplies them during scans. To return to the file tags, disable the setting and run a full scan.
+
 ## LDAP Support
 
 > [!WARNING]

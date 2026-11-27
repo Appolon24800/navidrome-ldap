@@ -379,6 +379,8 @@ func (n noopProvider) RefreshInfo(context.Context, model.Kind, string) error {
 	return nil
 }
 
+func (n noopProvider) QueueTrackCredits(context.Context, string) {}
+
 // Compile-time interface checks
 var (
 	_ artwork.Artwork   = noopArtwork{}
