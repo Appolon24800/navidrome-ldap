@@ -17,6 +17,7 @@ import (
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/core/lyrics"
+	"github.com/navidrome/navidrome/core/musicbrainz"
 	"github.com/navidrome/navidrome/core/storage"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
@@ -321,6 +322,9 @@ func (p *phaseFolders) loadTagsFromFiles(entry *folderEntry, toImport map[string
 				entry.albumIDMap[track.AlbumID] = prevAlbumID
 			}
 		}
+	}
+	if err := musicbrainz.ApplyCached(p.ctx, p.ds.Property(), tracks); err != nil {
+		log.Warn(p.ctx, "Scanner: Could not apply cached MusicBrainz track credits", "folder", entry.path, err)
 	}
 	entry.tracks = tracks
 	entry.tags = slices.Collect(maps.Values(uniqueTags))

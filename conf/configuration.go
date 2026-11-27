@@ -55,6 +55,7 @@ type Options struct {
 	EnableTranscodingConfig         bool
 	EnableDownloads                 bool
 	EnableExternalServices          bool
+	EnableMusicBrainzTrackCredits   bool
 	EnableM3UExternalAlbumArt       bool
 	EnableInsightsCollector         bool
 	EnableScheduledDBAnalyze        bool
@@ -1016,6 +1017,7 @@ func setViperDefaults() {
 	viper.SetDefault("smartPlaylistRefreshDelay", consts.DefaultSmartRefresh)
 	viper.SetDefault("enabledownloads", true)
 	viper.SetDefault("enableexternalservices", true)
+	viper.SetDefault("enablemusicbrainztrackcredits", false)
 	viper.SetDefault("enablem3uexternalalbumart", false)
 	viper.SetDefault("enablemediafilecoverart", true)
 	viper.SetDefault("autotranscodedownload", false)

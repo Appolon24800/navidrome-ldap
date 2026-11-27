@@ -13,6 +13,7 @@ import (
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/core/agents"
 	"github.com/navidrome/navidrome/core/matcher"
+	"github.com/navidrome/navidrome/core/musicbrainz"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/server/events"
@@ -36,15 +37,17 @@ type Provider interface {
 	SimilarSongs(ctx context.Context, id string, count int) (model.MediaFiles, error)
 	TopSongs(ctx context.Context, artist, artistId string, count int) (model.MediaFiles, error)
 	RefreshInfo(ctx context.Context, kind model.Kind, id string) error
+	QueueTrackCredits(ctx context.Context, albumID string)
 }
 
 type provider struct {
-	ds          model.DataStore
-	ag          Agents
-	matcher     *matcher.Matcher
-	broker      events.Broker
-	artistQueue refreshQueue[auxArtist]
-	albumQueue  refreshQueue[auxAlbum]
+	ds           model.DataStore
+	ag           Agents
+	matcher      *matcher.Matcher
+	broker       events.Broker
+	artistQueue  refreshQueue[auxArtist]
+	albumQueue   refreshQueue[auxAlbum]
+	trackCredits *musicbrainz.Refresher
 }
 
 type auxAlbum struct {
@@ -88,11 +91,21 @@ type Agents interface {
 }
 
 // NewProvider runs background info refreshes until ctx is done.
-func NewProvider(ctx context.Context, ds model.DataStore, agents Agents, m *matcher.Matcher, broker events.Broker) Provider {
+func NewProvider(ctx context.Context, ds model.DataStore, agents Agents, m *matcher.Matcher, broker events.Broker, scanner model.Scanner) Provider {
 	e := &provider{ds: ds, ag: agents, matcher: m, broker: broker}
+	cfg := conf.Server()
+	if cfg.EnableExternalServices && cfg.EnableMusicBrainzTrackCredits && scanner != nil {
+		e.trackCredits = musicbrainz.GetRefresher(ctx, ds, scanner)
+	}
 	e.artistQueue = newRefreshQueue(ctx, e.populateArtistInfo)
 	e.albumQueue = newRefreshQueue(ctx, e.populateAlbumInfo)
 	return e
+}
+
+func (e *provider) QueueTrackCredits(ctx context.Context, albumID string) {
+	if e.trackCredits != nil {
+		e.trackCredits.Queue(ctx, albumID, false)
+	}
 }
 
 func (e *provider) broadcastRefresh(ctx context.Context, resource, id string) {
@@ -125,6 +138,7 @@ func (e *provider) UpdateAlbumInfo(ctx context.Context, id string) (*model.Album
 		log.Info(ctx, "Not found", "id", id)
 		return nil, err
 	}
+	e.QueueTrackCredits(ctx, album.ID)
 
 	updatedAt := gg.V(album.ExternalInfoUpdatedAt)
 	albumName := album.Name()
@@ -316,6 +330,9 @@ func (e *provider) RefreshInfo(ctx context.Context, kind model.Kind, id string) 
 		album, err := e.getAlbum(ctx, id)
 		if err != nil {
 			return err
+		}
+		if e.trackCredits != nil {
+			e.trackCredits.Queue(ctx, album.ID, true)
 		}
 		_, err = e.populateAlbumInfo(ctx, album)
 		return err

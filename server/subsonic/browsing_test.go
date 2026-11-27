@@ -245,6 +245,8 @@ type fakeInfoProvider struct {
 	artist *model.Artist
 }
 
+func (f *fakeInfoProvider) QueueTrackCredits(context.Context, string) {}
+
 func (f *fakeInfoProvider) UpdateAlbumInfo(context.Context, string) (*model.Album, error) {
 	return f.album, nil
 }

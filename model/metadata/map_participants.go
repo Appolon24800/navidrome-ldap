@@ -101,7 +101,7 @@ func (md Metadata) processPerformers(participants model.Participants, rolesMbzId
 		names := splitParticipantValues(conf, []string{performer.Value()})
 		for _, name := range names {
 			artist := model.Artist{
-				ID:              md.artistID(name),
+				ID:              artistID(name),
 				Name:            name,
 				OrderArtistName: str.SanitizeFieldForSortingNoArticle(name),
 				MbzArtistID:     md.getPerformerMbid(subRole, rolesMbzIdMap, roleIdx),
@@ -156,21 +156,27 @@ func (md Metadata) parseArtists(
 func (md Metadata) buildArtists(names, sorts, mbids []string) []model.Artist {
 	var artists []model.Artist
 	for i, name := range names {
-		id := md.artistID(name)
-		artist := model.Artist{
-			ID:              id,
-			Name:            name,
-			OrderArtistName: str.SanitizeFieldForSortingNoArticle(name),
-		}
+		var sortName, mbid string
 		if i < len(sorts) {
-			artist.SortArtistName = sorts[i]
+			sortName = sorts[i]
 		}
 		if i < len(mbids) {
-			artist.MbzArtistID = mbids[i]
+			mbid = mbids[i]
 		}
-		artists = append(artists, artist)
+		artists = append(artists, NewArtist(name, sortName, mbid))
 	}
 	return artists
+}
+
+// NewArtist gives an artist the same library identity as an equivalent file tag.
+func NewArtist(name, sortName, mbid string) model.Artist {
+	return model.Artist{
+		ID:              artistID(name),
+		Name:            name,
+		SortArtistName:  sortName,
+		OrderArtistName: str.SanitizeFieldForSortingNoArticle(name),
+		MbzArtistID:     mbid,
+	}
 }
 
 // splitParticipantValues splits values by the conf separators, dropping

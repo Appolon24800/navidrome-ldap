@@ -209,6 +209,9 @@ func (api *Router) GetAlbum(r *http.Request) (*responses.Subsonic, error) {
 
 	response := newResponse()
 	response.AlbumWithSongsID3 = api.buildAlbum(ctx, album, mfs)
+	if api.provider != nil {
+		api.provider.QueueTrackCredits(ctx, album.ID)
+	}
 	return response, nil
 }
 
@@ -259,6 +262,9 @@ func (api *Router) GetSong(r *http.Request) (*responses.Subsonic, error) {
 
 	response := newResponse()
 	response.Song = new(childFromMediaFile(ctx, *mf))
+	if api.provider != nil {
+		api.provider.QueueTrackCredits(ctx, mf.AlbumID)
+	}
 	return response, nil
 }
 
