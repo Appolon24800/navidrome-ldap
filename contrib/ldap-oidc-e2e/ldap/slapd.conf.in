@@ -1,0 +1,19 @@
+# Private OpenLDAP directory for contrib/ldap-oidc-e2e. run.sh fills in the paths.
+include @SCHEMA@/core.schema
+include @SCHEMA@/cosine.schema
+include @SCHEMA@/inetorgperson.schema
+include @SCHEMA@/nis.schema
+@include_modulepath@
+pidfile @WORK@/ldap/slapd.pid
+argsfile @WORK@/ldap/slapd.args
+
+database mdb
+suffix "dc=example,dc=org"
+# The read-only account navidrome binds with (ND_LDAP_BINDDN).
+rootdn "cn=Service,dc=example,dc=org"
+rootpw service-secret
+directory @WORK@/ldap/data
+maxsize 33554432
+index objectClass eq
+# Gives uid=alice a memberOf attribute, which ND_LDAP_ADMINGROUP matches.
+overlay memberof

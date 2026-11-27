@@ -1,0 +1,43 @@
+dn: dc=example,dc=org
+objectClass: dcObject
+objectClass: organization
+o: Example
+dc: example
+
+dn: ou=people,dc=example,dc=org
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=alice,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+cn: Alice Liddell
+sn: Liddell
+uid: alice
+mail: alice@example.org
+userPassword: wonderland
+
+dn: uid=bob,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+cn: Bob Builder
+sn: Builder
+uid: bob
+mail: bob@example.org
+userPassword: builderpw
+
+dn: uid=carol,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+cn: Carol Disabled
+sn: Disabled
+uid: carol
+mail: carol@example.org
+description: disabled
+userPassword: carolpw
+
+dn: cn=navidrome-admins,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: navidrome-admins
+member: uid=alice,ou=people,dc=example,dc=org
