@@ -3,6 +3,7 @@ package subsonic
 import (
 	"context"
 	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"net/http/httptest"
 
@@ -200,7 +201,7 @@ var _ = Describe("App Password Subsonic Auth", func() {
 		// hex-encode the literal string "enc:6162" so the parent flow
 		// decodes it once into the plaintext. A buggy double-decode would
 		// take the decoded "enc:6162" and decode again to "ab".
-		hexEncoded := fmt.Sprintf("%x", []byte(trickyPlaintext))
+		hexEncoded := hex.EncodeToString([]byte(trickyPlaintext))
 		r := newGetRequest("u="+username, "p=enc:"+hexEncoded)
 		authenticate(ds)(nextHandler).ServeHTTP(w, r)
 

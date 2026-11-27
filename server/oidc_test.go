@@ -62,14 +62,13 @@ func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
 }
 
 func (p *oidcTestProvider) serve(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	switch r.URL.Path {
 	case "/.well-known/openid-configuration":
-		_ = json.NewEncoder(w).Encode(map[string]any{"issuer": p.server.URL,
+		writeJSON(w, map[string]any{"issuer": p.server.URL,
 			"authorization_endpoint": p.server.URL + "/authorize", "token_endpoint": p.server.URL + "/token",
 			"jwks_uri": p.server.URL + "/keys", "id_token_signing_alg_values_supported": []string{"RS256"}})
 	case "/keys":
-		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{
+		writeJSON(w, map[string]any{"keys": []any{map[string]any{
 			"kty": "RSA", "kid": "test", "alg": "RS256", "use": "sig",
 			"n": base64.RawURLEncoding.EncodeToString(p.key.N.Bytes()),
 			"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(p.key.E)).Bytes()),
@@ -94,10 +93,14 @@ func (p *oidcTestProvider) serve(w http.ResponseWriter, r *http.Request) {
 			expiry = time.Now().Add(-time.Hour)
 		}
 		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"test"}`))
-		claims, _ := json.Marshal(map[string]any{"iss": issuer, "aud": p.audience, "sub": p.subject,
+		claims, err := json.Marshal(map[string]any{"iss": issuer, "aud": p.audience, "sub": p.subject,
 			"iat": time.Now().Unix(), "exp": expiry.Unix(), "nonce": nonce, "azp": p.azp,
 			"preferred_username": p.username, "name": p.name, "email": p.email,
 			"groups": []string{"admins"}, "isAdmin": true})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		unsigned := header + "." + base64.RawURLEncoding.EncodeToString(claims)
 		digest := sha256.Sum256([]byte(unsigned))
 		sig, _ := rsa.SignPKCS1v15(rand.Reader, p.key, crypto.SHA256, digest[:])
@@ -105,8 +108,16 @@ func (p *oidcTestProvider) serve(w http.ResponseWriter, r *http.Request) {
 			sig[0] ^= 1
 		}
 		p.lastIDToken = unsigned + "." + base64.RawURLEncoding.EncodeToString(sig)
-		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "provider-access-token", "token_type": "Bearer",
+		writeJSON(w, map[string]any{"access_token": "provider-access-token", "token_type": "Bearer",
 			"id_token": p.lastIDToken})
+	}
+}
+
+// writeJSON answers a provider request with JSON.
+func writeJSON(w http.ResponseWriter, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 
@@ -199,7 +210,7 @@ func TestOIDCLogin(t *testing.T) {
 	if err != nil || claims.UserID != user.ID || !claims.IsAdmin || claims.Subject != "alice" || claims.SessionExpiresAt.IsZero() {
 		t.Fatalf("invalid Navidrome session: %+v, %v", claims, err)
 	}
-	stored, err := o.ds.User().FindByUsernameWithPassword(context.Background(), user.UserName)
+	stored, err := o.ds.User().FindByUsernameWithPassword(t.Context(), user.UserName)
 	if err != nil || stored.Name != "Existing Name" || stored.Password != "local-password" || stored.AuthType != model.AuthTypeLocal || !stored.IsAdmin {
 		t.Fatalf("OIDC modified the linked account: %+v, %v", stored, err)
 	}
@@ -282,7 +293,7 @@ func TestOIDCAutomaticallyCreatesUsers(t *testing.T) {
 	if !strings.HasSuffix(w.Header().Get("Location"), "oidc=complete") {
 		t.Fatalf("automatic provisioning failed: %s", w.Header().Get("Location"))
 	}
-	user, err := o.ds.User().FindByUsernameWithPassword(context.Background(), "new-listener")
+	user, err := o.ds.User().FindByUsernameWithPassword(t.Context(), "new-listener")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,17 +316,17 @@ func TestOIDCAutomaticallyMatchesExistingUsernames(t *testing.T) {
 	// Put replaced NewPassword with its ciphertext: clear it so the stored password is kept.
 	existing.AuthType = model.AuthTypeLDAP
 	existing.NewPassword = ""
-	if err := o.ds.User().Put(context.Background(), existing); err != nil {
+	if err := o.ds.User().Put(t.Context(), existing); err != nil {
 		t.Fatal(err)
 	}
-	user, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "ALICE"})
+	user, err := o.resolveUser(t.Context(), p.subject, oidcUserClaims{PreferredUsername: "ALICE"})
 	if err != nil || user.ID != existing.ID || user.AuthType != model.AuthTypeLDAP || !user.IsAdmin {
 		t.Fatalf("existing account was not preserved: %v", err)
 	}
-	if stored, err := o.ds.User().FindByUsernameWithPassword(context.Background(), user.UserName); err != nil || stored.Password != "local-password" {
+	if stored, err := o.ds.User().FindByUsernameWithPassword(t.Context(), user.UserName); err != nil || stored.Password != "local-password" {
 		t.Fatalf("existing credential was not preserved: %v", err)
 	}
-	count, _ := o.ds.User().CountAll(context.Background())
+	count, _ := o.ds.User().CountAll(t.Context())
 	if count != 1 {
 		t.Fatal("created a duplicate instead of matching the existing username")
 	}
@@ -323,23 +334,23 @@ func TestOIDCAutomaticallyMatchesExistingUsernames(t *testing.T) {
 
 func TestOIDCRemembersIdentityAfterUsernameChanges(t *testing.T) {
 	o, p, existing := setupOIDC(t)
-	if _, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "alice"}); err != nil {
+	if _, err := o.resolveUser(t.Context(), p.subject, oidcUserClaims{PreferredUsername: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	// The automatic association survives a new login manager/server restart.
 	o = newOIDCLogin(o.ds)
-	user, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "new-username"})
+	user, err := o.resolveUser(t.Context(), p.subject, oidcUserClaims{PreferredUsername: "new-username"})
 	if err != nil || user.ID != existing.ID {
 		t.Fatalf("username change lost the existing user's data: %v", err)
 	}
-	if _, err := o.resolveUser(context.Background(), "different-subject", oidcUserClaims{PreferredUsername: "alice"}); err == nil {
+	if _, err := o.resolveUser(t.Context(), "different-subject", oidcUserClaims{PreferredUsername: "alice"}); err == nil {
 		t.Fatal("a different provider identity claimed an already-associated username")
 	}
 }
 
 func TestOIDCDeletedAccountsDoNotInheritReplacementPrivileges(t *testing.T) {
 	o, p, existing := setupOIDC(t)
-	if _, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "alice"}); err != nil {
+	if _, err := o.resolveUser(t.Context(), p.subject, oidcUserClaims{PreferredUsername: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	// The original account is deleted and a new account takes over its username.
@@ -347,10 +358,10 @@ func TestOIDCDeletedAccountsDoNotInheritReplacementPrivileges(t *testing.T) {
 		t.Fatal(err)
 	}
 	replacement := &model.User{ID: "replacement-user", UserName: existing.UserName, Name: existing.Name, IsAdmin: true, NewPassword: "local-password"}
-	if err := o.ds.User().Put(context.Background(), replacement); err != nil {
+	if err := o.ds.User().Put(t.Context(), replacement); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := o.resolveUser(context.Background(), p.subject, oidcUserClaims{PreferredUsername: "alice"}); err == nil {
+	if _, err := o.resolveUser(t.Context(), p.subject, oidcUserClaims{PreferredUsername: "alice"}); err == nil {
 		t.Fatal("the deleted identity inherited a replacement account")
 	}
 }

@@ -24,9 +24,9 @@ func oidcUserKey(kind, issuer, value string) string {
 	return "oidc." + kind + ":" + hex.EncodeToString(hash[:])
 }
 
-// Match the trusted provider's username automatically on first login, or create
-// an ordinary user. Save the issuer/subject association internally so subsequent
-// username changes cannot move an identity into a different Navidrome account.
+// resolveUser matches the provider's username to an existing account, or creates a
+// regular user. It stores the issuer and subject pair, so a later username change
+// cannot move that identity into a different account.
 func (o *oidcLogin) resolveUser(ctx context.Context, subject string, claims oidcUserClaims) (*model.User, error) {
 	username := strings.TrimSpace(claims.PreferredUsername)
 	if subject == "" || username == "" || strings.ContainsAny(username, "\x00\r\n") {

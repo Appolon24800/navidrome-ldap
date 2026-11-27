@@ -1,6 +1,7 @@
 package conf
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -21,18 +22,17 @@ type oidcOptions struct {
 	MaxSessionDuration time.Duration
 }
 
-// OIDC uses administrator-configured URLs, never request Host or forwarded headers.
-// HTTP is permitted only on loopback addresses for local development.
+// validateOIDC only accepts administrator-configured URLs, and HTTPS unless the host is loopback.
 func (s *Options) validateOIDC() error {
 	o := s.OIDC
 	if !o.Enabled {
 		if o.AutoRedirect {
-			return fmt.Errorf("OIDC.AutoRedirect requires OIDC.Enabled=true")
+			return errors.New("OIDC.AutoRedirect requires OIDC.Enabled=true")
 		}
 		return nil
 	}
 	if strings.TrimSpace(o.ClientID) == "" || strings.TrimSpace(o.DisplayName) == "" {
-		return fmt.Errorf("OIDC.ClientID and OIDC.DisplayName are required")
+		return errors.New("OIDC.ClientID and OIDC.DisplayName are required")
 	}
 	for name, value := range map[string]string{"IssuerURL": o.IssuerURL, "RedirectURL": o.RedirectURL} {
 		u, err := url.Parse(value)
@@ -41,18 +41,18 @@ func (s *Options) validateOIDC() error {
 		}
 		ip := net.ParseIP(u.Hostname())
 		loopback := u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback())
-		if u.Scheme != "https" && !(u.Scheme == "http" && loopback) {
+		if u.Scheme != "https" && (!loopback || u.Scheme != "http") {
 			return fmt.Errorf("OIDC.%s requires HTTPS (HTTP is allowed only on loopback)", name)
 		}
 		if name == "RedirectURL" {
 			base, err := url.Parse(s.BaseURL)
 			if err != nil || u.Path != strings.TrimRight(base.Path, "/")+"/auth/oidc/callback" {
-				return fmt.Errorf("OIDC.RedirectURL must end with the configured base path followed by /auth/oidc/callback")
+				return errors.New("OIDC.RedirectURL must end with the configured base path followed by /auth/oidc/callback")
 			}
 		}
 	}
 	if o.MaxSessionDuration <= 0 {
-		return fmt.Errorf("OIDC.MaxSessionDuration must be positive")
+		return errors.New("OIDC.MaxSessionDuration must be positive")
 	}
 	return nil
 }

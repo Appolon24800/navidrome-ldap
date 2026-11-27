@@ -152,37 +152,15 @@ func authenticate(ds model.DataStore) func(next http.Handler) http.Handler {
 					return
 				}
 
-				// App-password fast path. When the request carries a `p` or
-				// salt+token, try matching against the user's active app
-				// passwords FIRST. This avoids hitting LDAP on every Subsonic
-				// request from a client using an app password — which is the
-				// whole point of decoupling Subsonic auth from the directory.
-				// LDAP deployments with lockout policies (AD lockoutThreshold,
-				// FreeIPA password policy) would otherwise lock the user's
-				// directory account on every legitimate app-password request.
-				//
-				// We also use this lookup to enforce the LDAP-no-direct-password
-				// policy: an LDAP-backed user MUST authenticate with an app
-				// password — their directory password is no longer accepted at
-				// /rest, even via legacy `p=` or salt+token, since it would
-				// otherwise still be checkable via the LDAP bind in
-				// `ValidateLogin` and persist the directory password problem.
+				// An app password is checked before the password: LDAP-backed users have no stored password,
+				// and their clients must never reach the directory, where repeated binds can lock the account.
 				if jwt == "" && (pass != "" || token != "") {
-					lookupUsr, appID, ok := matchAppPassword(ctx, ds, username, pass, token, salt)
-					if ok {
-						slot.release(false)
-						if touchErr := ds.AppPassword().Touch(ctx, appID); touchErr != nil {
-							log.Warn(ctx, "API: Failed to bump app password last_used_at", "id", appID, "username", username, touchErr)
+					if usr, err = appPasswordLogin(ctx, ds, username, pass, token, salt); usr != nil || err != nil {
+						slot.release(err != nil)
+						if err != nil {
+							log.Warn(ctx, "API: Rejecting non-app-password Subsonic auth for LDAP user", "username", username, "remoteAddr", r.RemoteAddr)
 						}
-						ctx = request.WithUser(ctx, *lookupUsr)
-						next.ServeHTTP(w, r.WithContext(ctx))
-						return
-					}
-					if lookupUsr != nil && lookupUsr.IsLDAP() {
-						slot.release(true)
-						log.Warn(ctx, "API: Rejecting non-app-password Subsonic auth for LDAP user", "username", username, "remoteAddr", r.RemoteAddr)
-						sendError(w, r, newError(responses.ErrorAuthenticationFail))
-						return
+						break
 					}
 				}
 
@@ -338,6 +316,25 @@ func validateCredentials(user *model.User, pass, token, salt, jwt string) error 
 	}
 	return nil
 }
+
+// appPasswordLogin matches the password or salt+token of the request against the user's active
+// app passwords. An LDAP-backed user without a match gets errAppPasswordRequired instead of a password check.
+func appPasswordLogin(ctx context.Context, ds model.DataStore, username, pass, token, salt string) (*model.User, error) {
+	usr, appID, ok := matchAppPassword(ctx, ds, username, pass, token, salt)
+	if ok {
+		if touchErr := ds.AppPassword().Touch(ctx, appID); touchErr != nil {
+			log.Warn(ctx, "API: Failed to bump app password last_used_at", "id", appID, "username", username, touchErr)
+		}
+		return usr, nil
+	}
+	if usr != nil && usr.IsLDAP() {
+		return nil, errAppPasswordRequired
+	}
+	return nil, nil
+}
+
+// errAppPasswordRequired rejects an LDAP-backed user that did not send an app password.
+var errAppPasswordRequired = errors.New("LDAP users must authenticate with an app password")
 
 // matchAppPassword tries to authenticate the request against the user's
 // active app passwords. Returns:

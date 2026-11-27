@@ -18,9 +18,8 @@ import (
 // guessing budget.
 const appPasswordSecretBytes = 32
 
-// User-app-password endpoints. A user (or an admin) can list, create, and
-// revoke app passwords for any user. The plaintext secret is returned only
-// once, on creation.
+// addAppPasswordRoute registers the app password endpoints below /user/{id}/app-password.
+// The plaintext secret is returned once, on creation.
 func (api *Router) addAppPasswordRoute(r chi.Router) {
 	r.Route("/user/{id}/app-password", func(r chi.Router) {
 		r.Use(parseUserIDMiddleware)
@@ -139,7 +138,7 @@ func createAppPassword(ds model.DataStore) http.HandlerFunc {
 			ID        string `json:"id"`
 			UserID    string `json:"userId"`
 			Name      string `json:"name"`
-			Secret    string `json:"secret"` //nolint:gosec // intentional one-time return
+			Secret    string `json:"secret"`
 			CreatedAt string `json:"createdAt"`
 		}{
 			ID:        ap.ID,

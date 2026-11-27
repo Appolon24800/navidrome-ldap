@@ -35,8 +35,8 @@ type oidcTransaction struct {
 	deadline               time.Time
 }
 
-// All provider credentials stay on the server. The browser holds only a random,
-// short-lived transaction handle, bound to a single authorization attempt.
+// oidcLogin keeps every provider credential on the server. The browser only ever
+// holds a random, short-lived transaction handle bound to one authorization attempt.
 type oidcLogin struct {
 	ds     model.DataStore
 	client *http.Client
@@ -121,7 +121,7 @@ func (o *oidcLogin) cookie(w http.ResponseWriter, value string, maxAge int) {
 		// sibling subdomain. Browsers require Path=/ for this prefix.
 		cookiePath = "/"
 	}
-	http.SetCookie(w, &http.Cookie{Name: o.cookieName(), Value: value,
+	http.SetCookie(w, &http.Cookie{Name: o.cookieName(), Value: value, //nolint:gosec // Secure follows the configured callback scheme
 		Path: cookiePath, HttpOnly: true,
 		Secure:   o.secure,
 		SameSite: http.SameSiteLaxMode, MaxAge: maxAge})
@@ -269,5 +269,7 @@ func (o *oidcLogin) session(w http.ResponseWriter, r *http.Request) {
 	payload := buildAuthPayload(user, "")
 	payload["token"] = token
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(payload)
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		log.Warn(r, "Could not send the OIDC session")
+	}
 }

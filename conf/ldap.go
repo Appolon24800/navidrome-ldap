@@ -1,7 +1,7 @@
 package conf
 
 import (
-	"fmt"
+	"errors"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -64,7 +64,7 @@ func (s *Options) validateLDAPLivenessSchedule() error {
 // of silent breakage that's better caught at startup.
 func (s *Options) validateLDAPAdminFilter() error {
 	if af := s.LDAP.AdminFilter; af != "" && !strings.Contains(af, "%s") {
-		return fmt.Errorf("ND_LDAP_ADMINFILTER must contain %%s placeholder for the username")
+		return errors.New("ND_LDAP_ADMINFILTER must contain %s placeholder for the username")
 	}
 	return nil
 }

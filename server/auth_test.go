@@ -462,14 +462,14 @@ var _ = Describe("Auth", func() {
 		It("validateLoginLDAP returns nil if Host is not configured", func() {
 			conf.Update(func(c *conf.Options) { c.LDAP.Host = "" })
 			u, err := validateLoginLDAP(ctx, ds.User(), "user", "pass")
-			Expect(err).To(BeNil())
+			Expect(err).NotTo(HaveOccurred())
 			Expect(u).To(BeNil())
 		})
 
 		It("validateLoginLDAP returns nil if connection fails", func() {
 			conf.Update(func(c *conf.Options) { c.LDAP.Host = "ldap://invalid-host:389" })
 			u, err := validateLoginLDAP(ctx, ds.User(), "user", "pass")
-			Expect(err).To(BeNil())
+			Expect(err).NotTo(HaveOccurred())
 			Expect(u).To(BeNil())
 		})
 
@@ -479,7 +479,7 @@ var _ = Describe("Auth", func() {
 			_ = userRepo.Put(ctx, &model.User{ID: "1", UserName: "user", NewPassword: "password", Name: "User"})
 
 			u, err := ValidateLogin(ctx, userRepo, "user", "password")
-			Expect(err).To(BeNil())
+			Expect(err).NotTo(HaveOccurred())
 			Expect(u).ToNot(BeNil())
 			Expect(u.UserName).To(Equal("user"))
 		})
@@ -490,7 +490,7 @@ var _ = Describe("Auth", func() {
 			_ = userRepo.Put(ctx, &model.User{ID: "1", UserName: "user", NewPassword: "password", Name: "User"})
 
 			u, err := ValidateLogin(ctx, userRepo, "user", "password")
-			Expect(err).To(BeNil())
+			Expect(err).NotTo(HaveOccurred())
 			Expect(u).ToNot(BeNil())
 			Expect(u.UserName).To(Equal("user"))
 		})
@@ -507,7 +507,7 @@ var _ = Describe("Auth", func() {
 				_ = userRepo.Put(ctx, &model.User{ID: "1", UserName: "user", NewPassword: "password", Name: "User"})
 
 				u, err := ValidateLogin(ctx, userRepo, "user", "")
-				Expect(err).To(BeNil())
+				Expect(err).NotTo(HaveOccurred())
 				Expect(u).To(BeNil())
 			})
 
@@ -523,11 +523,11 @@ var _ = Describe("Auth", func() {
 				_ = userRepo.ClearPassword(ctx, "ldap-1")
 
 				u, err := ValidateLogin(ctx, userRepo, "ldapper", "")
-				Expect(err).To(BeNil())
+				Expect(err).NotTo(HaveOccurred())
 				Expect(u).To(BeNil())
 
 				u, err = ValidateLogin(ctx, userRepo, "ldapper", "any-non-empty-password")
-				Expect(err).To(BeNil())
+				Expect(err).NotTo(HaveOccurred())
 				Expect(u).To(BeNil())
 			})
 
@@ -542,7 +542,7 @@ var _ = Describe("Auth", func() {
 				_ = userRepo.ClearPassword(ctx, "stale-1")
 
 				u, err := ValidateLogin(ctx, userRepo, "staleuser", "anything")
-				Expect(err).To(BeNil())
+				Expect(err).NotTo(HaveOccurred())
 				Expect(u).To(BeNil())
 			})
 		})
@@ -563,19 +563,19 @@ var _ = Describe("Auth", func() {
 			_ = ds.User().Put(ctx, &model.User{ID: "ldap-1", UserName: "ldapper", Name: "Ldapper", AuthType: model.AuthTypeLDAP})
 			_ = ds.AppPassword().Put(ctx, &model.AppPassword{UserID: "ldap-1", Name: "Feishin", NewPassword: "app-secret"})
 
-			req := httptest.NewRequest("POST", "/login", strings.NewReader(`{"username":"ldapper","password":"app-secret"}`))
+			req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"username":"ldapper","password":"app-secret"}`))
 			resp := httptest.NewRecorder()
 			login(ds)(resp, req)
 
 			Expect(resp.Code).To(Equal(http.StatusOK))
 			var parsed map[string]any
-			Expect(json.Unmarshal(resp.Body.Bytes(), &parsed)).To(BeNil())
+			Expect(json.Unmarshal(resp.Body.Bytes(), &parsed)).To(Succeed())
 			Expect(parsed["username"]).To(Equal("ldapper"))
 			tokenStr := parsed["token"].(string)
 			Expect(tokenStr).ToNot(BeEmpty())
 
 			claims, err := auth.Validate(tokenStr)
-			Expect(err).To(BeNil())
+			Expect(err).NotTo(HaveOccurred())
 			Expect(claims.AppPasswordID).ToNot(BeEmpty())
 			Expect(claims.AppPasswordName).To(Equal("Feishin"))
 
@@ -593,7 +593,7 @@ var _ = Describe("Auth", func() {
 			_ = ds.User().Put(ctx, &model.User{ID: "ldap-1", UserName: "ldapper", Name: "Ldapper", AuthType: model.AuthTypeLDAP})
 			_ = ds.AppPassword().Put(ctx, &model.AppPassword{UserID: "ldap-1", Name: "Feishin", NewPassword: "app-secret"})
 
-			req := httptest.NewRequest("POST", "/login", strings.NewReader(`{"username":"ldapper","password":"wrong"}`))
+			req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"username":"ldapper","password":"wrong"}`))
 			resp := httptest.NewRecorder()
 			login(ds)(resp, req)
 
@@ -606,13 +606,13 @@ var _ = Describe("Auth", func() {
 			_ = ds.AppPassword().Put(ctx, &model.AppPassword{UserID: "local-1", Name: "Feishin", NewPassword: "app-secret"})
 
 			// The main password still works.
-			req := httptest.NewRequest("POST", "/login", strings.NewReader(`{"username":"localer","password":"real-pass"}`))
+			req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"username":"localer","password":"real-pass"}`))
 			resp := httptest.NewRecorder()
 			login(ds)(resp, req)
 			Expect(resp.Code).To(Equal(http.StatusOK))
 
 			// The app password must NOT grant web/JWT access to a local user.
-			req = httptest.NewRequest("POST", "/login", strings.NewReader(`{"username":"localer","password":"app-secret"}`))
+			req = httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"username":"localer","password":"app-secret"}`))
 			resp = httptest.NewRecorder()
 			login(ds)(resp, req)
 			Expect(resp.Code).To(Equal(http.StatusUnauthorized))
@@ -639,7 +639,7 @@ var _ = Describe("Auth", func() {
 				called = true
 				w.WriteHeader(http.StatusOK)
 			}))
-			req := httptest.NewRequest("GET", "/api/song", nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/song", nil)
 			if token != "" {
 				req.Header.Set(consts.UIAuthorizationHeader, "Bearer "+token)
 			}
@@ -665,7 +665,7 @@ var _ = Describe("Auth", func() {
 
 		It("passes through for a regular token without an apid claim", func() {
 			token, err := auth.CreateToken(&model.User{ID: "u1", UserName: "regular"})
-			Expect(err).To(BeNil())
+			Expect(err).NotTo(HaveOccurred())
 
 			resp, called := doRequest(token)
 			Expect(*called).To(BeTrue())
@@ -675,7 +675,7 @@ var _ = Describe("Auth", func() {
 		It("passes through when the backing app password is still active", func() {
 			apID := seedAppPassword()
 			token, err := auth.CreateTokenWithAppPassword(&model.User{ID: "u-ldap", UserName: "ldapper", AuthType: model.AuthTypeLDAP}, apID, "Feishin")
-			Expect(err).To(BeNil())
+			Expect(err).NotTo(HaveOccurred())
 
 			resp, called := doRequest(token)
 			Expect(*called).To(BeTrue())
@@ -685,7 +685,7 @@ var _ = Describe("Auth", func() {
 		It("rejects with 401 when the app password has been revoked", func() {
 			apID := seedAppPassword()
 			token, err := auth.CreateTokenWithAppPassword(&model.User{ID: "u-ldap", UserName: "ldapper", AuthType: model.AuthTypeLDAP}, apID, "Feishin")
-			Expect(err).To(BeNil())
+			Expect(err).NotTo(HaveOccurred())
 
 			Expect(ds.AppPassword().Revoke(ctx, apID)).To(Succeed())
 
@@ -696,7 +696,7 @@ var _ = Describe("Auth", func() {
 
 		It("rejects with 401 when the app password no longer exists", func() {
 			token, err := auth.CreateTokenWithAppPassword(&model.User{ID: "u-ldap", UserName: "ldapper", AuthType: model.AuthTypeLDAP}, "ap-missing", "Feishin")
-			Expect(err).To(BeNil())
+			Expect(err).NotTo(HaveOccurred())
 
 			resp, called := doRequest(token)
 			Expect(*called).To(BeFalse())
