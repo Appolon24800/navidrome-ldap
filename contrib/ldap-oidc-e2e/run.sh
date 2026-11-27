@@ -24,7 +24,8 @@ find_dir() { # find_dir <fallback list> <file that must exist>
 }
 SCHEMA=$(find_dir "${SCHEMA_DIR:-/etc/openldap/schema /etc/ldap/schema}" core.schema) ||
   { echo "OpenLDAP schema directory not found (no core.schema)" >&2; exit 2; }
-# memberof is a loadable module on most builds and built into slapd on the others.
+# Debian and Ubuntu ship the mdb backend and the memberof overlay as modules. Other builds, and
+# possibly this one, have them built in. MODULES is empty when no module directory exists.
 MODULES=$(find_dir "${MODULE_DIR:-/usr/lib/openldap /usr/lib/ldap /usr/libexec/openldap}" memberof.so) || MODULES=""
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/navidrome-e2e.XXXXXX")
@@ -55,9 +56,12 @@ wait_for_port() { # wait_for_port <port> <name>
 # OpenLDAP directory
 mkdir -p "$WORK/ldap/data" "$WORK/ldap/slapd.d"
 python3 - "$HERE/ldap/slapd.conf.in" "$WORK/slapd.conf" "$SCHEMA" "$WORK" "$MODULES" <<'PY'
+import os
 import sys
 template, output, schema, work, modules = sys.argv[1:6]
-module_lines = f"modulepath {modules}\nmoduleload memberof.so" if modules else ""
+module_dir = next((d for d in modules.split() if os.path.isdir(d)), "")
+loads = [f"moduleload {name}.so" for name in ("back_mdb", "memberof") if os.path.isfile(f"{module_dir}/{name}.so")]
+module_lines = "\n".join([f"modulepath {module_dir}", *loads] if loads else [])
 text = open(template).read().replace("@SCHEMA@", schema).replace("@WORK@", work)
 text = text.replace("@include_modulepath@", module_lines)
 open(output, "w").write(text)
