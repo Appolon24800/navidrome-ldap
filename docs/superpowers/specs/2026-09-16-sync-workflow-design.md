@@ -58,10 +58,13 @@ behind upstream, with 22 conflicted paths.
 Decisions:
 
 - **A blocked sync is visible.** A conflicting merge, or a clean merge that
-  fails the build, the tests or the end-to-end check, opens or updates one
-  issue titled "Upstream sync needs attention" and fails the run. The issue
-  lists the conflicted files or the last 60 log lines, with the commands to
-  resolve them.
+  fails the build, the tests or the end-to-end check, fails the run and writes
+  the conflicted files, or the last 60 log lines, to the run summary. Failed
+  scheduled runs email the owner, which is how the broken 2026-08 runs surfaced.
+- **The tracking issue needs the Issues feature.** With Issues enabled, the
+  same run opens or updates one issue titled "Upstream sync needs attention"
+  with the details and the commands to resolve them. This fork has Issues
+  disabled (2026-11-27), so there the failed run is the only signal.
 - **A clean merge is tested before it is pushed.** `git merge --no-commit`
   leaves the merge uncommitted, `make build test test-js` and
   `contrib/ldap-oidc-e2e/run.sh` run on the merged tree, and only a passing
